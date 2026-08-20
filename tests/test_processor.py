@@ -242,7 +242,110 @@ class ProcessorTests(unittest.TestCase):
         )
         self.assertEqual(
             processor.immich_client.tag_single_asset.call_args_list[0].args,
-            ("asset-1", ["rating-general", "one-girl"]),
+            ("asset-1", ["rating-general", "one-girl", "processed"]),
+        )
+        processor.immich_client.tag_single_asset.assert_called_once()
+
+    def test_zero_prediction_asset_is_marked_and_counted_as_processed(self):
+        processor = ImmichAutoTagger.__new__(ImmichAutoTagger)
+        processor.logger = Mock()
+        processor.metrics = Mock()
+        processor.metrics.metrics = {
+            "assets_processed": 0,
+            "tags_assigned": 0,
+            "processing_time": 0,
+            "failures": 0,
+        }
+        processor.processed_tag = Tag(id="processed", name="auto:processed")
+        processor.content_rating_tags = {"key-1": {}}
+        processor.immich_client = Mock()
+        processor.immich_client.api_key = "key-1"
+        processor.immich_client.current_library_name = "Library_1"
+        processor.immich_client.download_asset.return_value = b"new"
+        processor.immich_client.get_or_create_tags_bulk.return_value = {}
+        processor.tagging_engine = Mock()
+        processor.tagging_engine.predict_tags_batch.return_value = [[]]
+        processor.failure_tracker = Mock()
+        processor.total_processed_assets = 0
+        processor.total_assigned_tags = 0
+        processor.library_metrics = {
+            "Library_1": {
+                "processed_assets": 0,
+                "assigned_tags": 0,
+                "failed_assets": 0,
+            }
+        }
+
+        already_processed = Mock(spec=Asset)
+        already_processed.id = "asset-old"
+        already_processed.type = "IMAGE"
+        already_processed.tags = [processor.processed_tag]
+        already_processed.originalFileName = "old.jpg"
+
+        new_asset = Mock(spec=Asset)
+        new_asset.id = "asset-new"
+        new_asset.type = "IMAGE"
+        new_asset.tags = []
+        new_asset.originalFileName = "new.jpg"
+
+        with patch("immich_tagger.processor.performance_monitor"):
+            result = processor.process_batch([already_processed, new_asset])
+
+        self.assertFalse(result.results[0].newly_processed)
+        self.assertTrue(result.results[1].newly_processed)
+        self.assertEqual(result.results[1].tags_assigned, [])
+        processor.immich_client.tag_single_asset.assert_called_once_with(
+            "asset-new",
+            ["processed"],
+        )
+        self.assertEqual(processor.total_processed_assets, 1)
+        self.assertEqual(
+            processor.library_metrics["Library_1"]["processed_assets"],
+            1,
+        )
+        self.assertTrue(
+            any(
+                "Batch: 1 processed, 1 already done" in call.args[0]
+                for call in processor.logger.info.call_args_list
+            )
+        )
+
+    def test_combined_tag_request_failure_does_not_mark_asset_processed(self):
+        processor = ImmichAutoTagger.__new__(ImmichAutoTagger)
+        processor.metrics = Mock()
+        processor.metrics.metrics = {
+            "assets_processed": 0,
+            "tags_assigned": 0,
+            "processing_time": 0,
+            "failures": 0,
+        }
+        processor.processed_tag = Tag(id="processed", name="auto:processed")
+        processor.content_rating_tags = {"key-1": {}}
+        processor.immich_client = Mock()
+        processor.immich_client.api_key = "key-1"
+        processor.immich_client.get_or_create_tags_bulk.return_value = {
+            "tag_one": Tag(id="tag-one", name="tag_one")
+        }
+        processor.immich_client.tag_single_asset.side_effect = RuntimeError(
+            "tag request failed"
+        )
+
+        asset = Mock(spec=Asset)
+        asset.id = "asset-1"
+
+        with patch("immich_tagger.processor.performance_monitor"):
+            result = processor._apply_predictions(
+                asset,
+                [TagPrediction(name="tag_one", confidence=0.8)],
+                time.time(),
+            )
+
+        self.assertFalse(result.success)
+        self.assertFalse(result.newly_processed)
+        self.assertIn("tag request failed", result.error)
+        processor.immich_client.tag_single_asset.assert_called_once_with(
+            "asset-1",
+            ["tag-one", "processed"],
         )
 
     def test_process_batch_uses_one_batched_model_call(self):

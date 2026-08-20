@@ -76,6 +76,7 @@ class AssetProcessingResult(BaseModel):
     """Result of processing an asset."""
     asset_id: str
     success: bool
+    newly_processed: bool = False
     tags_assigned: List[str] = []
     processing_time: float = 0.0
     error: Optional[str] = None

@@ -215,16 +215,17 @@ class ImmichAutoTagger:
                 tag_ids.append(tag.id)
                 result.tags_assigned.append(tag.path)
 
+            if (
+                self.processed_tag
+                and self.processed_tag.id not in assigned_tag_ids
+            ):
+                tag_ids.append(self.processed_tag.id)
+
             if tag_ids:
                 self.immich_client.tag_single_asset(asset.id, tag_ids)
 
-            if self.processed_tag:
-                self.immich_client.tag_single_asset(
-                    asset.id,
-                    [self.processed_tag.id],
-                )
-
             result.success = True
+            result.newly_processed = True
             result.processing_time = time.time() - start_time
             self.metrics.metrics["assets_processed"] += 1
             self.metrics.metrics["tags_assigned"] += len(result.tags_assigned)
@@ -454,8 +455,12 @@ class ImmichAutoTagger:
         # Calculate batch statistics
         successful = sum(1 for r in results if r.success)
         failed = sum(1 for r in results if not r.success and r.error)
-        skipped = sum(1 for r in results if r.success and not r.tags_assigned)  # Already processed
-        processed = sum(1 for r in results if r.success and r.tags_assigned)  # Newly processed
+        skipped = sum(
+            1 for r in results if r.success and not r.newly_processed
+        )
+        processed = sum(
+            1 for r in results if r.success and r.newly_processed
+        )
         total_tags_assigned = sum(len(r.tags_assigned) for r in results if r.success)
         
         batch_result = BatchProcessingResult(
