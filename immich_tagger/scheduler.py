@@ -4,7 +4,6 @@ Scheduler for continuous operation of the Immich Auto-Tagger.
 
 import asyncio
 from datetime import datetime, timedelta
-import threading
 from typing import Optional
 from croniter import croniter
 import pytz
@@ -12,6 +11,7 @@ import pytz
 from .config import settings
 from .logging import get_logger
 from .processor import ImmichAutoTagger
+from .run_lock import ProcessingRunLock
 
 
 MODEL_KEEP_LOADED_WINDOW = timedelta(minutes=15)
@@ -26,7 +26,7 @@ class Scheduler:
         self.running = False
         self.timezone = pytz.timezone(settings.timezone)
         self.last_run_time: Optional[datetime] = None
-        self._processing_lock = threading.Lock()
+        self._processing_lock = ProcessingRunLock(purpose="scheduler")
         
     def _get_next_run_time(self) -> datetime:
         """Get the next scheduled run time based on cron expression."""
@@ -94,8 +94,14 @@ class Scheduler:
     def _run_processing_cycle_sync(self):
         """Run a processing cycle for all libraries."""
         if not self._processing_lock.acquire(blocking=False):
+            owner_description = getattr(
+                self._processing_lock,
+                "owner_description",
+                lambda: "owner details unavailable",
+            )()
             self.logger.warning(
-                "⏭️  Processing run skipped: another run is already active"
+                "⏭️  Processing run skipped: another run is already active "
+                f"({owner_description})"
             )
             return False
 

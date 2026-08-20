@@ -102,8 +102,10 @@ class SchedulerRunControlTests(unittest.TestCase):
 
         self.assertFalse(result)
         self.scheduler.processor.run_processing_cycle.assert_not_called()
-        self.scheduler.logger.warning.assert_called_once_with(
-            "⏭️  Processing run skipped: another run is already active"
+        self.scheduler.logger.warning.assert_called_once()
+        self.assertIn(
+            "Processing run skipped: another run is already active",
+            self.scheduler.logger.warning.call_args.args[0],
         )
         self.scheduler._manage_model_retention.assert_not_called()
 

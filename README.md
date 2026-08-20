@@ -79,6 +79,12 @@ For example, `BATCH_SIZE=250` and `MAX_BATCHES_PER_RUN=4` process at most
 remaining eligible images resume at the next scheduled run. Runs are guarded
 so a second trigger is skipped while an earlier run is still active.
 
+The run guard combines an in-process lock with an advisory lock at
+`/config/.processing-run.lock`. This prevents overlapping scheduler containers
+or manually launched `single`/`continuous` sessions when they share the same
+`/config` mount. The file may remain after a crash, but ownership is tied to an
+open file descriptor and is automatically released when that process exits.
+
 ### Verifying the running image
 
 Every published image reports its release identity at startup and through

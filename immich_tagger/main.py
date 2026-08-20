@@ -11,6 +11,7 @@ from .processor import ImmichAutoTagger, ProcessorError
 from .config import settings
 from .logging import setup_logging, get_logger
 from .health_server import run_health_server
+from .run_lock import ProcessingRunLock
 from .scheduler import Scheduler
 
 
@@ -120,6 +121,21 @@ async def run_with_health_server(processor: ImmichAutoTagger, mode: str, max_cyc
     
     # Start health server in background
     health_task = asyncio.create_task(run_health_server_async(processor))
+    processing_lock = None
+
+    if mode in {"single", "continuous"}:
+        processing_lock = ProcessingRunLock(purpose=mode)
+        if not processing_lock.acquire(blocking=False):
+            logger.warning(
+                "⏭️  Processing skipped: another run is already active "
+                f"({processing_lock.owner_description()})"
+            )
+            health_task.cancel()
+            try:
+                await health_task
+            except asyncio.CancelledError:
+                pass
+            return
     
     try:
         if mode == "single":
@@ -150,6 +166,9 @@ async def run_with_health_server(processor: ImmichAutoTagger, mode: str, max_cyc
     except KeyboardInterrupt:
         logger.info("⏹️  Received interrupt signal, shutting down")
     finally:
+        if processing_lock is not None:
+            processing_lock.release()
+
         # Cancel health server
         health_task.cancel()
         try:
