@@ -198,6 +198,54 @@ class SchedulerRunControlTests(unittest.TestCase):
 
         self.assertFalse(self.scheduler._processing_lock.locked())
 
+    def test_long_run_waits_for_next_future_cron_occurrence(self):
+        settings.max_batches_per_run = 1
+        original_cron_schedule = settings.cron_schedule
+        settings.cron_schedule = "*/15 * * * *"
+        self.addCleanup(
+            setattr,
+            settings,
+            "cron_schedule",
+            original_cron_schedule,
+        )
+
+        clock = {
+            "now": datetime(2026, 8, 20, 9, 0, tzinfo=timezone.utc),
+        }
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return clock["now"]
+
+        def process_batch():
+            clock["now"] = datetime(
+                2026,
+                8,
+                20,
+                9,
+                20,
+                tzinfo=timezone.utc,
+            )
+            return True
+
+        self.scheduler.processor.run_processing_cycle.side_effect = process_batch
+
+        with patch("immich_tagger.scheduler.datetime", FixedDateTime):
+            self.assertTrue(self.scheduler._run_processing_cycle_sync())
+            self.assertEqual(self.scheduler.last_run_time, clock["now"])
+            self.assertFalse(self.scheduler._should_run_now())
+
+            clock["now"] = datetime(
+                2026,
+                8,
+                20,
+                9,
+                30,
+                tzinfo=timezone.utc,
+            )
+            self.assertTrue(self.scheduler._should_run_now())
+
 
 class SchedulerModelRetentionTests(unittest.TestCase):
     def setUp(self):

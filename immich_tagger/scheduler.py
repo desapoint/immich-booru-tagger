@@ -115,9 +115,6 @@ class Scheduler:
             self.run_status.start(settings.max_batches_per_run)
             run_status_started = True
             
-            # Update last run time
-            self.last_run_time = datetime.now(self.timezone)
-            
             batches_processed = 0
             batch_limit_reached = False
             run_had_errors = False
@@ -318,6 +315,11 @@ class Scheduler:
             try:
                 self._manage_model_retention()
             finally:
+                # Base the next cron decision on when this run finished. If a
+                # long run crosses one or more cron occurrences, recording its
+                # start time would make those occurrences look unhandled and
+                # trigger another run immediately.
+                self.last_run_time = datetime.now(self.timezone)
                 self._processing_lock.release()
     
     async def _scheduler_loop(self):
