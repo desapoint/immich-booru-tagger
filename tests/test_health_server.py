@@ -14,6 +14,11 @@ class HealthServerTests(unittest.TestCase):
         processor = Mock()
         processor.library_metrics = {"Library_1": {"processed_assets": 2}}
         processor.get_metrics.return_value = {"assets_processed": 2}
+        processor.get_run_status.return_value = {
+            "state": "running",
+            "current_library": "Library_1",
+            "batches_processed": 2,
+        }
         processor.immich_client.library_configs = [
             {"name": "Library_1", "api_key": "key-1"},
             {"name": "Library_2", "api_key": "key-2"},
@@ -38,6 +43,11 @@ class HealthServerTests(unittest.TestCase):
         self.assertEqual(
             payload["build"],
             {"version": "v2.1.0", "revision": "abc123"},
+        )
+        self.assertEqual(payload["run_status"]["state"], "running")
+        self.assertEqual(
+            payload["run_status"]["current_library"],
+            "Library_1",
         )
         self.assertEqual(
             processor.immich_client._make_request_silent.call_args_list[0].kwargs,

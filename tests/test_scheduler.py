@@ -10,6 +10,7 @@ os.environ.setdefault("IMMICH_API_KEY", "test-api-key")
 
 from immich_tagger.scheduler import Scheduler
 from immich_tagger.config import settings
+from immich_tagger.run_status import RunStatus
 
 
 class SchedulerThreadingTests(unittest.IsolatedAsyncioTestCase):
@@ -46,6 +47,7 @@ class SchedulerRunControlTests(unittest.TestCase):
         self.scheduler._processing_lock = threading.Lock()
         self.scheduler._manage_model_retention = Mock()
         self.scheduler._next_library_index = 0
+        self.scheduler.run_status = RunStatus()
         self.current_library_index = None
 
         self.scheduler.processor.immich_client.library_configs = [
@@ -105,6 +107,13 @@ class SchedulerRunControlTests(unittest.TestCase):
         )
         self.assertEqual(self.scheduler._next_library_index, 1)
         self.assertFalse(self.scheduler._processing_lock.locked())
+        run_status = self.scheduler.run_status.snapshot()
+        self.assertEqual(run_status["state"], "idle")
+        self.assertEqual(run_status["outcome"], "paused")
+        self.assertEqual(run_status["batches_processed"], 3)
+        self.assertEqual(run_status["assets_processed"], 30)
+        self.assertEqual(run_status["tags_assigned"], 60)
+        self.assertIsNotNone(run_status["last_successful_run"])
 
     def test_starting_library_rotates_when_cap_is_smaller_than_library_count(self):
         settings.max_batches_per_run = 1
@@ -151,6 +160,10 @@ class SchedulerRunControlTests(unittest.TestCase):
                 for call in self.scheduler.logger.error.call_args_list
             )
         )
+        run_status = self.scheduler.run_status.snapshot()
+        self.assertEqual(run_status["outcome"], "paused_with_errors")
+        self.assertIn("Library 'Library_1'", run_status["last_error"])
+        self.assertIsNone(run_status["last_successful_run"])
 
     def test_overlapping_run_is_skipped(self):
         self.scheduler._processing_lock.acquire()
@@ -166,6 +179,12 @@ class SchedulerRunControlTests(unittest.TestCase):
             self.scheduler.logger.warning.call_args.args[0],
         )
         self.scheduler._manage_model_retention.assert_not_called()
+        run_status = self.scheduler.run_status.snapshot()
+        self.assertEqual(run_status["skipped_runs"], 1)
+        self.assertIn(
+            "owner details unavailable",
+            run_status["last_skip_reason"],
+        )
 
     def test_run_lock_is_released_if_model_retention_fails(self):
         settings.max_batches_per_run = 1

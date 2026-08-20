@@ -92,10 +92,12 @@ class HealthServer:
                 self.connection_cache.pop(f"library_{index}", None)
 
         build_info = get_build_info()
+        run_status = self.processor.get_run_status()
         health_status = HealthStatus(
             status="healthy" if overall_healthy else "unhealthy",
             version=build_info["version"],
             build=build_info,
+            run_status=run_status,
             metrics={
                 "libraries": library_statuses,
                 "global": self.processor.get_metrics(),

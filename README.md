@@ -101,6 +101,32 @@ docker inspect immich_booru_tagger --format '{{ index .Config.Labels "org.openco
 The revision in both outputs should match. Local source builds report
 `version=development` and `revision=unknown` unless build arguments are passed.
 
+### Operational status
+
+`/health` exposes a top-level `run_status` object, and `/metrics` includes the
+same object. It remains responsive while inference runs and reports fields such
+as:
+
+```json
+{
+  "state": "running",
+  "outcome": "running",
+  "current_library": "Library_1",
+  "batches_processed": 2,
+  "batch_limit": 4,
+  "assets_processed": 500,
+  "tags_assigned": 12400,
+  "last_successful_run": "2026-08-20T14:00:00+00:00",
+  "last_error": null,
+  "next_run": "2026-08-20T11:15:00-04:00",
+  "skipped_runs": 0
+}
+```
+
+Completed states use outcomes such as `completed`, `paused`, `failed`, or the
+corresponding `*_with_errors` value. Lock-contention skips include the other
+process's PID and mode in `last_skip_reason` when available.
+
 ### Content ratings
 
 The tagger creates a dedicated hierarchy for WD14's four content ratings:

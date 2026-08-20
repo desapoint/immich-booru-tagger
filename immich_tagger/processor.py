@@ -13,6 +13,7 @@ from .config import settings
 from .logging import get_logger, MetricsLogger
 from .performance_monitor import performance_monitor
 from .failure_tracker import FailureTracker
+from .run_status import RunStatus
 
 
 CONTENT_RATINGS = ("general", "sensitive", "questionable", "explicit")
@@ -30,6 +31,7 @@ class ImmichAutoTagger:
         self.logger = get_logger("processor")
         self.metrics = MetricsLogger()
         self.immich_client = ImmichClient()
+        self.run_status = RunStatus()
         self.tagging_engine = None
         self.processed_tag: Optional[Tag] = None
         self.processed_tags: Dict[str, Tag] = {}
@@ -645,6 +647,10 @@ class ImmichAutoTagger:
             "total_processed": self.total_processed_assets,
             "total_tags_assigned": self.total_assigned_tags
         }
+
+    def get_run_status(self) -> dict:
+        """Return a thread-safe operational processing snapshot."""
+        return self.run_status.snapshot()
     
     def get_failure_summary(self) -> dict:
         """Get failure tracking summary."""
@@ -680,7 +686,8 @@ class ImmichAutoTagger:
         combined_metrics = {
             "basic_metrics": base_metrics,
             "performance_metrics": performance_metrics,
-            "progress_info": progress_info
+            "progress_info": progress_info,
+            "run_status": self.get_run_status(),
         }
         
         return combined_metrics

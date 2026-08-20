@@ -98,6 +98,7 @@ class HealthStatus(BaseModel):
     timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     version: str = "development"
     build: Dict[str, str] = {}
+    run_status: Dict[str, Any] = {}
     metrics: Dict[str, Any] = {}
 
 

@@ -28,6 +28,7 @@ class Scheduler:
         self.last_run_time: Optional[datetime] = None
         self._processing_lock = ProcessingRunLock(purpose="scheduler")
         self._next_library_index = 0
+        self.run_status = self.processor.run_status
         
     def _get_next_run_time(self) -> datetime:
         """Get the next scheduled run time based on cron expression."""
@@ -104,21 +105,29 @@ class Scheduler:
                 "⏭️  Processing run skipped: another run is already active "
                 f"({owner_description})"
             )
+            self.run_status.record_skip(owner_description)
             return False
 
+        run_status_started = False
+        run_status_finished = False
         try:
             self.logger.info("🚀 Starting scheduled multi-library processing cycle")
+            self.run_status.start(settings.max_batches_per_run)
+            run_status_started = True
             
             # Update last run time
             self.last_run_time = datetime.now(self.timezone)
             
             batches_processed = 0
             batch_limit_reached = False
+            run_had_errors = False
             library_configs = self.processor.immich_client.library_configs
             library_count = len(library_configs)
 
             if library_count == 0:
                 self.logger.warning("⚠️  No libraries configured for processing")
+                self.run_status.finish("completed", successful=True)
+                run_status_finished = True
                 return True
 
             start_index = self._next_library_index % library_count
@@ -147,6 +156,22 @@ class Scheduler:
             }
             last_batch_library_index = None
 
+            def get_run_totals():
+                processed = 0
+                tags = 0
+                for config in library_configs:
+                    library_name = config["name"]
+                    current_metrics = self.processor.library_metrics.get(
+                        library_name, {}
+                    )
+                    processed += current_metrics.get(
+                        "processed_assets", 0
+                    ) - library_starts[library_name]["processed_assets"]
+                    tags += current_metrics.get(
+                        "assigned_tags", 0
+                    ) - library_starts[library_name]["assigned_tags"]
+                return processed, tags
+
             while any(
                 not state["complete"] and not state["failed"]
                 for state in library_states.values()
@@ -165,6 +190,7 @@ class Scheduler:
 
                     library_config = library_configs[library_index]
                     library_name = library_config["name"]
+                    self.run_status.set_current_library(library_name)
 
                     try:
                         self.processor.immich_client.switch_to_library(
@@ -188,10 +214,21 @@ class Scheduler:
                         if cycle_result:
                             batches_processed += 1
                             last_batch_library_index = library_index
+                            current_processed, current_tags = get_run_totals()
+                            self.run_status.update_progress(
+                                batches_processed,
+                                current_processed,
+                                current_tags,
+                            )
                         else:
                             state["complete"] = True
                     except Exception as e:
                         state["failed"] = True
+                        run_had_errors = True
+                        error_message = (
+                            f"Library '{library_name}': {e}"
+                        )
+                        self.run_status.record_error(error_message)
                         self.logger.error(
                             f"❌ Error processing library "
                             f"'{library_name}': {e}"
@@ -250,12 +287,34 @@ class Scheduler:
             else:
                 self.logger.info(f"🎉 All libraries processed: {total_processed} total assets, {total_tags} total tags assigned")
 
+            if batch_limit_reached:
+                outcome = (
+                    "paused_with_errors" if run_had_errors else "paused"
+                )
+            else:
+                outcome = (
+                    "completed_with_errors" if run_had_errors else "completed"
+                )
+            self.run_status.update_progress(
+                batches_processed,
+                total_processed,
+                total_tags,
+            )
+            self.run_status.finish(outcome, successful=not run_had_errors)
+            run_status_finished = True
+
             return True
             
         except Exception as e:
+            self.run_status.record_error(str(e))
+            if run_status_started:
+                self.run_status.finish("failed", successful=False)
+                run_status_finished = True
             self.logger.error(f"❌ Error during scheduled processing cycle: {e}")
             return False
         finally:
+            if run_status_started and not run_status_finished:
+                self.run_status.finish("interrupted", successful=False)
             try:
                 self._manage_model_retention()
             finally:
@@ -275,6 +334,7 @@ class Scheduler:
                     
                     # Calculate next run time
                     next_run = self._get_next_run_time()
+                    self.run_status.set_next_run(next_run)
                     self.logger.info(f"⏭️  Next scheduled run: {next_run.isoformat()}")
                 
                 # Sleep for a minute before checking again
@@ -295,6 +355,7 @@ class Scheduler:
         
         # Show initial schedule
         next_run = self._get_next_run_time()
+        self.run_status.set_next_run(next_run)
         self.logger.info(f"⏰ Scheduler started - Schedule: {settings.cron_schedule}, Timezone: {settings.timezone}, Next run: {next_run.isoformat()}")
         
         # Check if we should run immediately (first time or missed schedule)
@@ -308,6 +369,7 @@ class Scheduler:
         """Stop the scheduler."""
         self.logger.info("Stopping scheduler")
         self.running = False
+        self.run_status.set_next_run(None)
 
 
 async def run_scheduler():
