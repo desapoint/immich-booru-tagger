@@ -21,3 +21,8 @@ config
 logs
 
 processing_failures*.json
+
+# Local task planning
+TODO.md
+TASKS.md
+*.local
