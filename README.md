@@ -23,11 +23,11 @@ python -m immich_tagger.main
 
 ## How It Works
 
-1. **Finds Untagged Images**: Uses Immich's metadata search to find images with no tags
+1. **Finds Images**: Finds untagged images globally, or untreated images in configured target albums
 2. **AI Processing**: Runs ~250 images at a time through WD-14/DeepDanbooru models
 3. **Auto-Tagging**: Applies predicted tags with confidence filtering
-4. **Self-Managing**: Tagged images disappear from future searches
-5. **Repeats**: Continues until no untagged images remain
+4. **Self-Managing**: A processed marker excludes completed images from future runs
+5. **Repeats**: Continues until no eligible images remain
 
 **Features**: Resumable, efficient, self-managing, GPU-accelerated, multi-library support.
 
@@ -42,7 +42,27 @@ python -m immich_tagger.main
 | `IMMICH_API_KEYS` | Multiple API keys (JSON array) | `[]` |
 | `CONFIDENCE_THRESHOLD` | Minimum tag confidence | `0.35` |
 | `BATCH_SIZE` | Assets per batch | `250` |
+| `PROCESSED_TAG_NAME` | Marker used to prevent reprocessing | `auto:processed` |
+| `TARGET_ALBUMS` | Comma-separated album names to process | Empty |
 | `FAILURE_TIMEOUT` | Max retries for failed assets | `3` |
+
+### Target Albums
+
+Leave `TARGET_ALBUMS` empty to preserve the original behavior, which processes
+images that have no tags at all. To limit processing to one or more albums, use
+a comma-separated list:
+
+```bash
+TARGET_ALBUMS=Anime,Hentai
+```
+
+Album names are matched case-insensitively. Assets in any matching album are
+processed unless they already carry `PROCESSED_TAG_NAME`. An invalid album name
+is logged and skipped while valid configured albums continue. If none of the
+configured names exist, that library run fails.
+
+`TARGET_ALBUMS` applies to every configured Immich library/user, so each one
+must have at least one matching accessible album.
 
 ### Multi-Library Support
 
@@ -120,8 +140,12 @@ python cleanup_failed_assets.py --force    # Force removal
 
 Your Immich API key needs these scopes:
 - `asset.read` - List and search assets
-- `asset.view/download` - Download thumbnails  
-- `tag.asset` - Create and assign tags
+- `asset.view` / `asset.download` - Download thumbnails or originals
+- `asset.update` - Allow tag associations to update assets
+- `tag.read` - Find existing tags
+- `tag.create` - Create predicted and processed-marker tags
+- `tag.asset` - Assign tags to assets
+- `album.read` - Resolve and search `TARGET_ALBUMS` when album filtering is enabled
 
 ## Architecture
 

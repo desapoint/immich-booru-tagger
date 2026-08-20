@@ -3,7 +3,6 @@ Main entry point for the Immich Auto-Tagger service.
 """
 
 import asyncio
-import signal
 import sys
 import argparse
 from typing import Optional
@@ -92,17 +91,13 @@ def run_single_cycle(processor: ImmichAutoTagger) -> bool:
     """Run a single processing cycle."""
     logger = get_logger("main")
     logger.info("🔄 Running single processing cycle...")
-    
-    try:
-        success = processor.run_processing_cycle()
-        if success:
-            logger.info("✅ Single cycle completed successfully")
-        else:
-            logger.info("✅ Single cycle completed - no more assets to process")
-        return success
-    except Exception as e:
-        logger.error(f"❌ Single cycle failed: {str(e)}")
-        return False
+
+    success = processor.run_processing_cycle()
+    if success:
+        logger.info("✅ Single cycle completed successfully")
+    else:
+        logger.info("✅ Single cycle completed - no more assets to process")
+    return success
 
 
 def run_continuous_processing(processor: ImmichAutoTagger, max_cycles: Optional[int] = None):
@@ -211,7 +206,7 @@ def main():
             
             permanently_failed = processor.get_failed_asset_ids(permanently_failed_only=True)
             if permanently_failed:
-                logger.info(f"🔗 Permanently failed asset IDs:")
+                logger.info("🔗 Permanently failed asset IDs:")
                 for i, asset_id in enumerate(permanently_failed[:20]):  # Show first 20
                     logger.info(f"   {i+1}. {asset_id}")
                 if len(permanently_failed) > 20:

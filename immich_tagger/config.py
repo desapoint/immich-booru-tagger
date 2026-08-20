@@ -2,9 +2,8 @@
 Configuration management for the Immich Auto-Tagger service.
 """
 
-import os
 import json
-from typing import Optional, List, Dict, Union
+from typing import Dict, List
 from pydantic import Field, validator
 from pydantic_settings import BaseSettings
 
@@ -20,9 +19,9 @@ class Settings(BaseSettings):
     
     # Processing Configuration
     confidence_threshold: float = Field(default=0.35, env="CONFIDENCE_THRESHOLD", ge=0.0, le=1.0)
-    batch_size: int = Field(default=250, env="BATCH_SIZE", description="Natural batch size from metadata API (~250)")
+    batch_size: int = Field(default=250, env="BATCH_SIZE", gt=0, description="Maximum assets processed per batch")
     processed_tag_name: str = Field(default="auto:processed", env="PROCESSED_TAG_NAME")
-    target_albums: str = Field(default="", env="TARGET_ALBUMs")
+    target_albums: str = Field(default="", env="TARGET_ALBUMS")
     failure_timeout: int = Field(default=3, env="FAILURE_TIMEOUT", ge=0, description="Max retries for failed assets (0 = never retry)")
     
     # Model Configuration

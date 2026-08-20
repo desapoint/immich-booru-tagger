@@ -25,7 +25,7 @@ class Asset(BaseModel):
     deviceAssetId: Optional[str] = None
     deviceId: Optional[str] = None
     ownerId: str
-    libraryId: : Optional[str] = None
+    libraryId: Optional[str] = None
     originalMimeType: Optional[str] = None
     thumbhash: Optional[str] = None
     localDateTime: Optional[datetime] = None

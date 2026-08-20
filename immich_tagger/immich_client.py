@@ -3,7 +3,7 @@ Immich API client for interacting with the Immich instance.
 """
 
 import time
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, Iterator, List, Optional
 import httpx
 from .models import Asset, Tag, BulkTagRequest, CreateTagRequest
 from .config import settings
@@ -238,55 +238,124 @@ class ImmichClient:
                 else:
                     raise ImmichAPIError(f"Request failed: {e}")
     
-    def get_untagged_assets(self) -> List[Asset]:
+    def _iter_metadata_asset_items(
+        self,
+        filters: Dict[str, Any],
+        page_size: int = 250
+    ) -> Iterator[Dict[str, Any]]:
+        """Yield every asset item from a paginated metadata search."""
+        if page_size < 1:
+            raise ImmichAPIError("Metadata search page size must be positive")
+
+        page = 1
+        visited_pages = set()
+
+        while True:
+            if page in visited_pages:
+                raise ImmichAPIError(
+                    f"Metadata search returned a repeated page: {page}"
+                )
+            visited_pages.add(page)
+
+            request_data = dict(filters)
+            request_data.update({"page": page, "size": page_size})
+
+            response = self._make_request(
+                method="POST",
+                endpoint="/api/search/metadata",
+                json_data=request_data
+            )
+            response_data = response.json()
+
+            if not isinstance(response_data, dict):
+                raise ImmichAPIError(
+                    "Metadata search returned a non-object response"
+                )
+
+            assets_section = response_data.get("assets")
+            if not isinstance(assets_section, dict):
+                raise ImmichAPIError(
+                    "Metadata search response is missing its assets section"
+                )
+
+            if "items" not in assets_section:
+                raise ImmichAPIError(
+                    "Metadata search assets section is missing its items"
+                )
+
+            assets_list = assets_section["items"]
+            if not isinstance(assets_list, list):
+                raise ImmichAPIError(
+                    "Metadata search assets section contains invalid items"
+                )
+
+            if not assets_list:
+                return
+
+            for asset_data in assets_list:
+                if not isinstance(asset_data, dict):
+                    raise ImmichAPIError(
+                        "Metadata search returned a non-object asset"
+                    )
+                yield asset_data
+
+            next_page = assets_section.get("nextPage")
+            if next_page in (None, ""):
+                return
+
+            try:
+                page = int(next_page)
+            except (TypeError, ValueError) as e:
+                raise ImmichAPIError(
+                    f"Metadata search returned an invalid next page: {next_page!r}"
+                ) from e
+
+            if page < 1:
+                raise ImmichAPIError(
+                    f"Metadata search returned an invalid next page: {page}"
+                )
+
+    def get_untagged_assets(self, limit: int = 250) -> List[Asset]:
         """Get image assets that have no tags using the metadata search endpoint.
         
-        This endpoint naturally returns up to 250 assets at a time that don't have any tags.
+        Metadata search pages are followed until the requested limit is reached.
         As we tag assets with 'auto:processed', they disappear from this search automatically.
         Only searches for IMAGE assets since WD14 cannot process videos.
         
         Returns:
-            List of untagged image assets (max 250 per call)
+            List of untagged image assets, capped by limit.
         """
+        if limit < 1:
+            raise ImmichAPIError("Asset search limit must be positive")
+
         library_name = self.current_library_name
         self.logger.debug(f"🔍 Library '{library_name}': Getting untagged image assets via metadata search")
         
-        # Use the metadata search endpoint to find image assets without any tags
-        response = self._make_request(
-            method="POST",
-            endpoint="/api/search/metadata",
-            json_data={
-                "tagIds": None,  # null/None means "assets with no tags"
-                "type": "IMAGE"  # Only process images, not videos (WD14 can't process videos)
-            }
-        )
-        
-        response_data = response.json()
-        
-        # Metadata search returns: {"albums": {...}, "assets": {"items": [...], "total": N, "nextPage": "..."}}
-        if not isinstance(response_data, dict) or "assets" not in response_data:
-            self.logger.error(f"❌ Library '{library_name}': Unexpected metadata response structure: {list(response_data.keys()) if isinstance(response_data, dict) else type(response_data)}")
-            return []
-            
-        assets_section = response_data["assets"]
-        assets_list = assets_section.get("items", [])
-        total_available = assets_section.get("total", len(assets_list))
-        
-        self.logger.debug(f"📊 Library '{library_name}': Metadata search: {len(assets_list)} assets returned, {total_available} total available")
-        
-        # Parse assets
         assets = []
-        for asset_data in assets_list:
+        page_size = min(250, limit)
+
+        for asset_data in self._iter_metadata_asset_items(
+            {
+                "tagIds": None,
+                "type": "IMAGE"
+            },
+            page_size=page_size
+        ):
             try:
-                if isinstance(asset_data, dict):
-                    assets.append(Asset(**asset_data))
-                else:
-                    self.logger.debug(f"⚠️  Library '{library_name}': Skipping non-dict asset data: {type(asset_data)}")
+                assets.append(Asset(**asset_data))
             except Exception as e:
-                self.logger.warning(f"⚠️  Library '{library_name}': Failed to parse asset: {e}")
-                continue
-        
-        self.logger.info(f"✅ Library '{library_name}': Found {len(assets)} untagged image assets (of {total_available} total available)")
+                asset_id = asset_data.get("id", "unknown")
+                raise ImmichAPIError(
+                    f"Failed to parse asset {asset_id}: {e}"
+                ) from e
+
+            if len(assets) >= limit:
+                break
+
+        self.logger.info(
+            f"✅ Library '{library_name}': "
+            f"Found {len(assets)} untagged image assets"
+        )
         return assets
     
     def get_unprocessed_assets(
@@ -308,7 +377,9 @@ class ImmichClient:
             -> return untreated assets in Anime OR Hentai
 
         When album filtering is enabled, an asset is considered treated
-        when it has processed_tag_id.
+        when Immich's metadata search matches it against processed_tag_id.
+        Search results do not reliably embed their tags, so processed IDs are
+        fetched separately and subtracted from the album assets.
         """
 
         target_album_names = [
@@ -317,9 +388,12 @@ class ImmichClient:
             if name.strip()
         ]
 
+        if limit < 1:
+            raise ImmichAPIError("Asset search limit must be positive")
+
         # Preserve the original tagger behavior when no albums are targeted.
         if not target_album_names:
-            return self.get_untagged_assets()
+            return self.get_untagged_assets(limit=limit)
 
         if not processed_tag_id:
             raise ImmichAPIError("processed_tag_id is required")
@@ -333,10 +407,15 @@ class ImmichClient:
         )
 
         albums = response.json()
+        if not isinstance(albums, list):
+            raise ImmichAPIError("Album listing returned a non-list response")
 
         albums_by_name = {}
 
         for album in albums:
+            if not isinstance(album, dict):
+                raise ImmichAPIError("Album listing returned a non-object album")
+
             name = album.get("albumName", "")
             album_id = album.get("id")
 
@@ -348,6 +427,7 @@ class ImmichClient:
 
         album_ids = []
         missing_albums = []
+        resolved_album_names = []
 
         for requested_name in target_album_names:
             matches = albums_by_name.get(
@@ -355,16 +435,31 @@ class ImmichClient:
                 []
             )
 
-            if not matches:
+            try:
+                if not matches:
+                    raise ImmichAPIError(
+                        f"Target album was not found: {requested_name}"
+                    )
+            except ImmichAPIError as e:
                 missing_albums.append(requested_name)
+                self.logger.error(
+                    f"❌ Library '{library_name}': {e}"
+                )
                 continue
 
             album_ids.extend(matches)
+            resolved_album_names.append(requested_name)
+
+        if not album_ids:
+            raise ImmichAPIError(
+                "None of the configured target albums were found: "
+                + ", ".join(missing_albums)
+            )
 
         if missing_albums:
-            raise ImmichAPIError(
-                "The following target albums were not found: "
-                + ", ".join(missing_albums)
+            self.logger.warning(
+                f"⚠️ Library '{library_name}': Continuing with valid target "
+                f"albums; missing: {', '.join(missing_albums)}"
             )
 
         album_ids = list(dict.fromkeys(album_ids))
@@ -372,87 +467,55 @@ class ImmichClient:
         self.logger.info(
             f"🎯 Library '{library_name}': "
             f"Filtering to albums: "
-            f"{', '.join(target_album_names)}"
+            f"{', '.join(resolved_album_names)}"
         )
 
+        search_filters = {
+            "albumIds": album_ids,
+            "type": "IMAGE"
+        }
+
+        processed_asset_ids = set()
+        for asset_data in self._iter_metadata_asset_items(
+            {**search_filters, "tagIds": [processed_tag_id]}
+        ):
+            asset_id = asset_data.get("id")
+            if not asset_id:
+                raise ImmichAPIError(
+                    "Processed asset search returned an asset without an ID"
+                )
+            processed_asset_ids.add(asset_id)
+
         assets = []
-        page = 1
-        page_size = 250
+        page_size = min(250, limit)
 
-        while len(assets) < limit:
-            response = self._make_request(
-                method="POST",
-                endpoint="/api/search/metadata",
-                json_data={
-                    "albumIds": album_ids,
-                    "type": "IMAGE",
-                    "page": page,
-                    "size": page_size
-                }
-            )
-
-            response_data = response.json()
-
-            if (
-                not isinstance(response_data, dict)
-                or "assets" not in response_data
-            ):
-                self.logger.error(
-                    f"❌ Library '{library_name}': "
-                    f"Unexpected metadata response"
-                )
-                return []
-
-            assets_section = response_data["assets"]
-            assets_list = assets_section.get("items", [])
-
-            if not assets_list:
-                break
-
-            for asset_data in assets_list:
-                if not isinstance(asset_data, dict):
-                    continue
-
-                existing_tags = asset_data.get("tags") or []
-
-                already_processed = any(
-                    isinstance(tag, dict)
-                    and tag.get("id") == processed_tag_id
-                    for tag in existing_tags
+        for asset_data in self._iter_metadata_asset_items(
+            search_filters,
+            page_size=page_size
+        ):
+            asset_id = asset_data.get("id")
+            if not asset_id:
+                raise ImmichAPIError(
+                    "Album asset search returned an asset without an ID"
                 )
 
-                if already_processed:
-                    continue
+            if asset_id in processed_asset_ids:
+                continue
 
-                try:
-                    assets.append(Asset(**asset_data))
-                except Exception as e:
-                    self.logger.warning(
-                        f"⚠️ Library '{library_name}': "
-                        f"Failed to parse asset: {e}"
-                    )
-                    continue
-
-                if len(assets) >= limit:
-                    break
+            try:
+                assets.append(Asset(**asset_data))
+            except Exception as e:
+                raise ImmichAPIError(
+                    f"Failed to parse asset {asset_id}: {e}"
+                ) from e
 
             if len(assets) >= limit:
                 break
 
-            next_page = assets_section.get("nextPage")
-
-            if not next_page:
-                break
-
-            try:
-                page = int(next_page)
-            except (TypeError, ValueError):
-                page += 1
-
         self.logger.info(
             f"🎯 Library '{library_name}': "
             f"Found {len(assets)} untreated images "
-            f"in albums: {', '.join(target_album_names)}"
+            f"in albums: {', '.join(resolved_album_names)}"
         )
 
         return assets

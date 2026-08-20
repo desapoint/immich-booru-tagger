@@ -3,10 +3,10 @@ Main processor for the Immich Auto-Tagger service.
 """
 
 import time
-from typing import List, Optional
-from .immich_client import ImmichClient, ImmichAPIError
-from .tagging_engine import create_tagging_engine, TaggingEngineError
-from .models import Asset, Tag, TagPrediction, AssetProcessingResult, BatchProcessingResult
+from typing import Dict, List, Optional
+from .immich_client import ImmichClient
+from .tagging_engine import create_tagging_engine
+from .models import Asset, Tag, AssetProcessingResult, BatchProcessingResult
 from .config import settings
 from .logging import get_logger, MetricsLogger
 from .performance_monitor import performance_monitor
@@ -27,6 +27,7 @@ class ImmichAutoTagger:
         self.immich_client = ImmichClient()
         self.tagging_engine = create_tagging_engine()
         self.processed_tag: Optional[Tag] = None
+        self.processed_tags: Dict[str, Tag] = {}
         
         # Progress tracking (global and per-library)
         self.total_processed_assets = 0
@@ -37,13 +38,20 @@ class ImmichAutoTagger:
         self.failure_tracker = None
         self.library_failure_trackers: Dict[str, FailureTracker] = {}
         
-        # Initialize the processed tag
-        self._initialize_processed_tag()
+        # Initialize tracking and the processed tag for the first library.
+        self.set_current_library(self.immich_client.current_library_name)
     
     def _initialize_processed_tag(self):
-        """Initialize the processed tag for marking completed assets."""
+        """Select or initialize the processed tag for the current library."""
+        library_key = self.immich_client.api_key
+
+        if library_key in self.processed_tags:
+            self.processed_tag = self.processed_tags[library_key]
+            return
+
         try:
             self.processed_tag = self.immich_client.get_or_create_tag(settings.processed_tag_name)
+            self.processed_tags[library_key] = self.processed_tag
             self.logger.info(f"🏷️  Using processed tag: '{self.processed_tag.name}'")
         except Exception as e:
             self.logger.error(f"❌ Failed to initialize processed tag: {str(e)}")
@@ -216,13 +224,17 @@ class ImmichAutoTagger:
                 "assigned_tags": 0,
                 "failed_assets": 0
             }
+
+        # Immich tags belong to a user. Resolve the marker again whenever the
+        # API key changes instead of reusing the first library's tag ID.
+        self._initialize_processed_tag()
     
     def get_unprocessed_assets(self, limit: Optional[int] = None) -> List[Asset]:
-        """Get untagged image assets that need processing.
-        
-        Now simplified: uses metadata search to find image assets with no tags.
-        Videos are excluded since WD14 cannot process them.
-        The API naturally returns ~250 assets at a time.
+        """Get eligible image assets that need processing.
+
+        With no target albums, eligible images have no tags. With target
+        albums, eligible images are in a configured album and do not carry the
+        processed marker. Videos are excluded because WD14 cannot process them.
         """
         if limit is None:
             limit = settings.batch_size
@@ -236,12 +248,13 @@ class ImmichAutoTagger:
                 raise ProcessorError("Processed tag has not been initialized")
 
             assets = self.immich_client.get_unprocessed_assets(
-                processed_tag_id=self.processed_tag.id
+                processed_tag_id=self.processed_tag.id,
+                limit=limit
             )
             
             if not assets:
                 library_name = self.immich_client.current_library_name
-                self.logger.info(f"✅ Library '{library_name}': No more untagged images found - processing complete!")
+                self.logger.info(f"✅ Library '{library_name}': No more eligible images found - processing complete!")
                 return []
             
             # Filter out permanently failed assets
@@ -253,12 +266,12 @@ class ImmichAutoTagger:
             if not filtered_assets:
                 if len(assets) > 0:
                     library_name = self.immich_client.current_library_name
-                    self.logger.warning(f"⚠️  Library '{library_name}': Found {len(assets)} untagged images, but all are permanently failed!")
+                    self.logger.warning(f"⚠️  Library '{library_name}': Found {len(assets)} eligible images, but all are permanently failed!")
                     self.logger.info("💡 Use --show-failures to see failed asset IDs or --reset-failures to retry them")
                 return []
             
             library_name = self.immich_client.current_library_name
-            self.logger.info(f"🎯 Library '{library_name}': Found {len(filtered_assets)} untagged images to process")
+            self.logger.info(f"🎯 Library '{library_name}': Found {len(filtered_assets)} eligible images to process")
             return filtered_assets
             
         except Exception as e:
@@ -285,7 +298,7 @@ class ImmichAutoTagger:
             
         except Exception as e:
             self.logger.error(f"❌ Processing cycle failed: {str(e)}")
-            return False
+            raise
     
     def run_continuous_processing(self, max_cycles: Optional[int] = None):
         """Run continuous processing until no more assets are found or max cycles reached."""
