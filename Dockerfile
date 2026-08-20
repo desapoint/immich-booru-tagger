@@ -8,9 +8,9 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app \
     HOME=/config \
+    CONFIG_DIR=/config \
     XDG_CACHE_HOME=/config/cache \
     HF_HOME=/config/huggingface \
-    TORCH_HOME=/config/torch \
     MODEL_CACHE_DIR=/config/models
 
 WORKDIR /app
@@ -22,11 +22,6 @@ RUN apt-get update \
         gosu \
         tini \
         passwd \
-        libgl1 \
-        libglib2.0-0 \
-        libsm6 \
-        libxext6 \
-        libxrender1 \
         libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -43,9 +38,13 @@ RUN sed -i 's/\r$//' /app/docker-entrypoint.sh \
     && chmod +x /app/docker-entrypoint.sh \
     && mkdir -p /config
 
+# Never publish an image whose source fails to compile or pass its unit tests.
+RUN python -m compileall -q /app/immich_tagger /app/tests \
+    && python -m unittest discover -s /app/tests -v
+
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5m --retries=3 \
     CMD python -c "import requests; requests.get('http://localhost:8000/health', timeout=5).raise_for_status()" || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/docker-entrypoint.sh"]

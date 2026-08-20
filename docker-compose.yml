@@ -9,7 +9,12 @@ services:
       - IMMICH_LIBRARIES=${IMMICH_LIBRARIES}
       - CONFIDENCE_THRESHOLD=${CONFIDENCE_THRESHOLD:-0.35}
       - BATCH_SIZE=${BATCH_SIZE:-250}
+      - INFERENCE_BATCH_SIZE=${INFERENCE_BATCH_SIZE:-8}
+      - CHARACTER_THRESHOLD=${CHARACTER_THRESHOLD:-0.9}
+      - WD_MODEL_REPO=${WD_MODEL_REPO:-SmilingWolf/wd-swinv2-tagger-v3}
+      - ONNX_INTRA_OP_THREADS=${ONNX_INTRA_OP_THREADS:-0}
       - PROCESSED_TAG_NAME=${PROCESSED_TAG_NAME:-auto:processed}
+      - CONTENT_RATING_TAG_NAME=${CONTENT_RATING_TAG_NAME:-content-rating}
       - TARGET_ALBUMS=${TARGET_ALBUMS:-}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - ENABLE_SCHEDULER=${ENABLE_SCHEDULER:-true}
@@ -17,10 +22,10 @@ services:
       - TIMEZONE=${TIMEZONE:-UTC}
       - FAILURE_TIMEOUT=${FAILURE_TIMEOUT:-3}
       - TAG_CACHE_TTL=${TAG_CACHE_TTL:-300}
+      - CONFIG_DIR=/config
+      - MODEL_CACHE_DIR=/config/models
     volumes:
-      - ./models:/app/models  # For caching AI models
-      - ./logs:/app/logs      # For persistent logs
-      - ./processing_failures.json:/app/processing_failures.json  # For failure tracking persistence
+      - ./config:/config  # Model cache and per-library failure state
     ports:
       - "8000:8000"  # Health endpoint
     restart: unless-stopped
@@ -29,4 +34,4 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 5m

@@ -3,7 +3,6 @@ Scheduler for continuous operation of the Immich Auto-Tagger.
 """
 
 import asyncio
-import time
 from datetime import datetime
 from typing import Optional
 from croniter import croniter
@@ -17,9 +16,9 @@ from .processor import ImmichAutoTagger
 class Scheduler:
     """Scheduler for running the auto-tagger at specified intervals."""
     
-    def __init__(self):
+    def __init__(self, processor: Optional[ImmichAutoTagger] = None):
         self.logger = get_logger("scheduler")
-        self.processor = ImmichAutoTagger()
+        self.processor = processor or ImmichAutoTagger()
         self.running = False
         self.timezone = pytz.timezone(settings.timezone)
         self.last_run_time: Optional[datetime] = None
@@ -52,6 +51,10 @@ class Scheduler:
         return now >= next_after_last_run
     
     async def _run_processing_cycle(self):
+        """Run synchronous multi-library processing outside the event loop."""
+        await asyncio.to_thread(self._run_processing_cycle_sync)
+
+    def _run_processing_cycle_sync(self):
         """Run a processing cycle for all libraries."""
         try:
             self.logger.info("🚀 Starting scheduled multi-library processing cycle")

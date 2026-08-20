@@ -10,14 +10,12 @@ CAUTION: This script will permanently delete assets from your Immich library.
 Use with care and ensure you have backups if needed.
 """
 
-import json
 import sys
 import argparse
 from typing import List, Dict, Optional
 from immich_tagger.immich_client import ImmichClient
 from immich_tagger.failure_tracker import FailureTracker
 from immich_tagger.logging import get_logger
-from immich_tagger.config import settings
 
 
 class AssetCleanupError(Exception):
@@ -238,7 +236,7 @@ class FailedAssetCleaner:
             self.cleanup_failure_records(deleted)
         
         # Summary
-        self.logger.info(f"✅ Cleanup complete:")
+        self.logger.info("✅ Cleanup complete:")
         self.logger.info(f"   🗑️  Deleted: {len(deleted)} assets")
         if errors:
             self.logger.info(f"   ❌ Errors: {len(errors)} assets")

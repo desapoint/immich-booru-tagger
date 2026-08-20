@@ -123,19 +123,22 @@ async def run_with_health_server(processor: ImmichAutoTagger, mode: str, max_cyc
     try:
         if mode == "single":
             # Run single cycle
-            success = run_single_cycle(processor)
+            success = await asyncio.to_thread(run_single_cycle, processor)
             if not success:
                 logger.info("✅ No assets to process, exiting")
                 return
         
         elif mode == "continuous":
-            # Run continuous processing
-            run_continuous_processing(processor, max_cycles)
+            await asyncio.to_thread(
+                run_continuous_processing,
+                processor,
+                max_cycles,
+            )
         
         elif mode == "scheduler":
             # Run with scheduler
             logger.info("⏰ Running in scheduler mode")
-            scheduler = Scheduler()
+            scheduler = Scheduler(processor=processor)
             await scheduler.start()
         
         elif mode == "health-only":

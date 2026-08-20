@@ -5,7 +5,7 @@ Failure tracking system for assets that consistently fail to process.
 import os
 import json
 from datetime import datetime, timezone
-from typing import Dict, List, Set
+from typing import Dict, List
 from .logging import get_logger
 from .config import settings
 
@@ -18,7 +18,10 @@ class FailureTracker:
         # Create library-specific failure file
         if failure_file is None:
             safe_name = self.library_name.replace(' ', '_').replace('/', '_')
-            self.failure_file = f"processing_failures_{safe_name}.json"
+            self.failure_file = os.path.join(
+                settings.config_dir,
+                f"processing_failures_{safe_name}.json",
+            )
         else:
             self.failure_file = failure_file
             
@@ -52,6 +55,9 @@ class FailureTracker:
     def save_failures(self):
         """Save failure data to disk."""
         try:
+            failure_directory = os.path.dirname(self.failure_file)
+            if failure_directory:
+                os.makedirs(failure_directory, exist_ok=True)
             data = {
                 "failures": self.failures,
                 "updated_at": datetime.now(timezone.utc).isoformat(),

@@ -17,6 +17,7 @@ venv
 
 data
 models
+config
 logs
 
 processing_failures*.json

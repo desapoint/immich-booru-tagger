@@ -20,8 +20,7 @@ mkdir -p \
     /config \
     /config/models \
     /config/cache \
-    /config/huggingface \
-    /config/torch
+    /config/huggingface
 
 #
 # PUID 0 explicitly means run as root.
@@ -69,11 +68,7 @@ fi
 chown -R "${PUID}:${PGID}" /config
 
 #
-# FailureTracker writes relative filenames such as:
-#
-# processing_failures_Library_1.json
-#
-# Running from /config makes them persistent.
+# Keep the process working directory on the persistent mount as well.
 #
 cd /config
 

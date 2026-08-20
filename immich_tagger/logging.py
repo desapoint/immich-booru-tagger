@@ -2,10 +2,8 @@
 Logging configuration for the Immich Auto-Tagger service.
 """
 
-import sys
 import logging
 from typing import Any, Dict
-from rich.console import Console
 from rich.logging import RichHandler
 from .config import settings
 
@@ -32,12 +30,9 @@ def setup_logging() -> None:
     logging.getLogger("httpcore").setLevel(logging.WARNING) 
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     
-    # Silence AI model loggers  
-    logging.getLogger("wdtagger").setLevel(logging.WARNING)
-    logging.getLogger("transformers").setLevel(logging.WARNING)
-    logging.getLogger("tensorflow").setLevel(logging.WARNING)
+    # Silence AI model download/runtime loggers
+    logging.getLogger("onnxruntime").setLevel(logging.WARNING)
     logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
-    logging.getLogger("safetensors").setLevel(logging.WARNING)
 
 
 def get_logger(name: str):

@@ -13,6 +13,9 @@ from .performance_monitor import performance_monitor
 from .failure_tracker import FailureTracker
 
 
+CONTENT_RATINGS = ("general", "sensitive", "questionable", "explicit")
+
+
 class ProcessorError(Exception):
     """Custom exception for processor errors."""
     pass
@@ -28,6 +31,7 @@ class ImmichAutoTagger:
         self.tagging_engine = create_tagging_engine()
         self.processed_tag: Optional[Tag] = None
         self.processed_tags: Dict[str, Tag] = {}
+        self.content_rating_tags: Dict[str, Dict[str, Tag]] = {}
         
         # Progress tracking (global and per-library)
         self.total_processed_assets = 0
@@ -38,7 +42,7 @@ class ImmichAutoTagger:
         self.failure_tracker = None
         self.library_failure_trackers: Dict[str, FailureTracker] = {}
         
-        # Initialize tracking and the processed tag for the first library.
+        # Initialize tracking and managed tags for the first library.
         self.set_current_library(self.immich_client.current_library_name)
     
     def _initialize_processed_tag(self):
@@ -56,85 +60,179 @@ class ImmichAutoTagger:
         except Exception as e:
             self.logger.error(f"❌ Failed to initialize processed tag: {str(e)}")
             raise ProcessorError(f"Failed to initialize processed tag: {e}")
+
+    def _initialize_content_rating_tags(self):
+        """Ensure rating hierarchy exists and migrate matching legacy tags."""
+        library_key = self.immich_client.api_key
+
+        if library_key in self.content_rating_tags:
+            return
+
+        try:
+            # Capture only pre-existing flat tags before creating the hierarchy.
+            existing_tags = self.immich_client.get_all_tags(use_cache=True)
+            legacy_tags = {
+                tag.path.casefold(): tag
+                for tag in existing_tags
+                if tag.parentId is None and tag.path.casefold() in CONTENT_RATINGS
+            }
+
+            parent = self.immich_client.get_or_create_tag(
+                settings.content_rating_tag_name
+            )
+            rating_tags = {
+                rating: self.immich_client.get_or_create_child_tag(parent, rating)
+                for rating in CONTENT_RATINGS
+            }
+            self.content_rating_tags[library_key] = rating_tags
+
+            self.logger.info(
+                "🏷️  Using content-rating hierarchy: "
+                f"'{settings.content_rating_tag_name}/"
+                f"{{{', '.join(CONTENT_RATINGS)}}}'"
+            )
+
+            # Immich cannot rename or reparent a tag. Move associations to the
+            # child tag and remove only a matching legacy flat rating tag.
+            for rating, source_tag in legacy_tags.items():
+                destination_tag = rating_tags[rating]
+                try:
+                    migrated_assets = self.immich_client.migrate_tag(
+                        source=source_tag,
+                        destination=destination_tag,
+                    )
+                    self.logger.info(
+                        f"♻️  Migrated flat rating tag '{source_tag.path}' to "
+                        f"'{destination_tag.path}' on {migrated_assets} assets"
+                    )
+                except Exception as e:
+                    # The hierarchy is still usable for new predictions. A
+                    # failed migration is safe to retry on the next launch.
+                    self.logger.error(
+                        f"❌ Failed to migrate flat rating tag "
+                        f"'{source_tag.path}': {e}"
+                    )
+        except Exception as e:
+            self.logger.error(
+                f"❌ Failed to initialize content-rating hierarchy: {e}"
+            )
+            raise ProcessorError(
+                f"Failed to initialize content-rating hierarchy: {e}"
+            ) from e
+
+    def _get_content_rating_tag(self, prediction_name: str) -> Optional[Tag]:
+        """Resolve a raw model rating name to the current library's child tag."""
+        rating = prediction_name.strip().casefold()
+        if rating not in CONTENT_RATINGS:
+            return None
+        return self.content_rating_tags.get(
+            self.immich_client.api_key,
+            {},
+        ).get(rating)
+
+    def _asset_is_processed(self, asset: Asset) -> bool:
+        """Return whether an asset already carries this library's marker."""
+        return bool(
+            self.processed_tag
+            and asset.tags
+            and any(tag.id == self.processed_tag.id for tag in asset.tags)
+        )
+
+    def _failed_result(
+        self,
+        asset_id: str,
+        start_time: float,
+        error: Exception,
+    ) -> AssetProcessingResult:
+        """Create and record an asset-level processing failure."""
+        self.metrics.metrics["failures"] += 1
+        return AssetProcessingResult(
+            asset_id=asset_id,
+            success=False,
+            error=str(error),
+            processing_time=time.time() - start_time,
+        )
+
+    def _apply_predictions(
+        self,
+        asset: Asset,
+        predictions,
+        start_time: float,
+    ) -> AssetProcessingResult:
+        """Resolve model predictions, assign tags, and mark an asset complete."""
+        result = AssetProcessingResult(asset_id=asset.id, success=False)
+
+        try:
+            tag_names = [
+                prediction.name
+                for prediction in predictions
+                if self._get_content_rating_tag(prediction.name) is None
+            ]
+            tag_mapping = self.immich_client.get_or_create_tags_bulk(tag_names)
+
+            tag_ids = []
+            assigned_tag_ids = set()
+            for prediction in predictions:
+                tag_name = prediction.name
+                tag = self._get_content_rating_tag(tag_name)
+                if tag is None:
+                    tag = tag_mapping.get(tag_name)
+                if tag is None or tag.id in assigned_tag_ids:
+                    continue
+
+                assigned_tag_ids.add(tag.id)
+                tag_ids.append(tag.id)
+                result.tags_assigned.append(tag.path)
+
+            if tag_ids:
+                self.immich_client.tag_single_asset(asset.id, tag_ids)
+
+            if self.processed_tag:
+                self.immich_client.tag_single_asset(
+                    asset.id,
+                    [self.processed_tag.id],
+                )
+
+            result.success = True
+            result.processing_time = time.time() - start_time
+            self.metrics.metrics["assets_processed"] += 1
+            self.metrics.metrics["tags_assigned"] += len(result.tags_assigned)
+            self.metrics.metrics["processing_time"] += result.processing_time
+            performance_monitor.record_asset_processed(result.processing_time)
+            return result
+        except Exception as e:
+            return self._failed_result(asset.id, start_time, e)
     
     def process_asset(self, asset: Asset) -> AssetProcessingResult:
         """Process a single asset for tagging."""
         start_time = time.time()
-        result = AssetProcessingResult(asset_id=asset.id, success=False)
-        
+
+        if asset.type != "IMAGE":
+            return AssetProcessingResult(
+                asset_id=asset.id,
+                success=False,
+                error=f"Unsupported asset type: {asset.type}",
+            )
+
+        if self._asset_is_processed(asset):
+            self.logger.debug(f"⏭️  Skipping already processed asset: {asset.id}")
+            return AssetProcessingResult(
+                asset_id=asset.id,
+                success=True,
+                processing_time=time.time() - start_time,
+            )
+
         try:
-            # Skip non-image assets for now (could be extended for video frames)
-            if asset.type != "IMAGE":
-                result.success = False
-                result.error = f"Unsupported asset type: {asset.type}"
-                return result
-            
-            # Check if asset already has the processed tag (skip if already done)
-            if self.processed_tag and hasattr(asset, 'tags') and asset.tags:
-                for tag in asset.tags:
-                    if tag.id == self.processed_tag.id:
-                        result.success = True
-                        result.tags_assigned = []
-                        result.processing_time = time.time() - start_time
-                        self.logger.debug(f"⏭️  Skipping already processed asset: {asset.id}")
-                        return result
-            
-            # Download asset thumbnail
             image_data = self.immich_client.download_asset(asset.id, use_thumbnail=True)
-            
-            # Predict tags
             predictions = self.tagging_engine.predict_tags(image_data)
-            
-            if not predictions:
-                result.success = True
-                result.tags_assigned = []
-            else:
-                # Use bulk tag operations for efficiency
-                tag_names = [prediction.name for prediction in predictions]
-                tag_mapping = self.immich_client.get_or_create_tags_bulk(tag_names)
-                
-                # Extract tag IDs for successful tags
-                tag_ids = []
-                for tag_name, tag in tag_mapping.items():
-                    tag_ids.append(tag.id)
-                    result.tags_assigned.append(tag_name)
-                
-                # Apply tags to asset
-                if tag_ids:
-                    self.immich_client.tag_single_asset(asset.id, tag_ids)
-                
-                result.success = True
-            
-            # Mark asset as processed
-            if self.processed_tag:
-                self.immich_client.tag_single_asset(asset.id, [self.processed_tag.id])
-            
-            processing_time = time.time() - start_time
-            result.processing_time = processing_time
-            
-            # Update internal metrics only
-            self.metrics.metrics["assets_processed"] += 1
-            self.metrics.metrics["tags_assigned"] += len(result.tags_assigned)
-            self.metrics.metrics["processing_time"] += processing_time
-            
-            # Record performance metrics
-            performance_monitor.record_asset_processed(processing_time)
-            
+            return self._apply_predictions(asset, predictions, start_time)
         except Exception as e:
-            processing_time = time.time() - start_time
-            result.success = False
-            result.error = str(e)
-            result.processing_time = processing_time
-            
-            # Update failure metrics only  
-            self.metrics.metrics["failures"] += 1
-        
-        return result
+            return self._failed_result(asset.id, start_time, e)
     
     def process_batch(self, assets: List[Asset]) -> BatchProcessingResult:
         """Process a batch of assets with optimized bulk operations."""
         start_time = time.time()
-        results = []
+        results = [None] * len(assets)
         
         # Pre-warm the tag cache before processing
         try:
@@ -142,9 +240,83 @@ class ImmichAutoTagger:
         except Exception as e:
             self.logger.warning(f"⚠️  Failed to pre-warm tag cache: {str(e)}")
         
-        for asset in assets:
-            result = self.process_asset(asset)
-            results.append(result)
+        inference_items = []
+        for index, asset in enumerate(assets):
+            asset_start_time = time.time()
+
+            if asset.type != "IMAGE":
+                results[index] = AssetProcessingResult(
+                    asset_id=asset.id,
+                    success=False,
+                    error=f"Unsupported asset type: {asset.type}",
+                )
+                continue
+
+            if self._asset_is_processed(asset):
+                results[index] = AssetProcessingResult(
+                    asset_id=asset.id,
+                    success=True,
+                    processing_time=time.time() - asset_start_time,
+                )
+                continue
+
+            try:
+                image_data = self.immich_client.download_asset(
+                    asset.id,
+                    use_thumbnail=True,
+                )
+                inference_items.append(
+                    (index, asset, image_data, asset_start_time)
+                )
+            except Exception as e:
+                results[index] = self._failed_result(
+                    asset.id,
+                    asset_start_time,
+                    e,
+                )
+
+        if inference_items:
+            try:
+                prediction_batches = self.tagging_engine.predict_tags_batch(
+                    [item[2] for item in inference_items]
+                )
+                if len(prediction_batches) != len(inference_items):
+                    raise ProcessorError(
+                        "Tagging engine returned an unexpected batch size"
+                    )
+
+                for item, predictions in zip(
+                    inference_items,
+                    prediction_batches,
+                ):
+                    index, asset, _, asset_start_time = item
+                    results[index] = self._apply_predictions(
+                        asset,
+                        predictions,
+                        asset_start_time,
+                    )
+            except Exception as e:
+                self.logger.warning(
+                    "⚠️  Batched inference failed; retrying images "
+                    f"individually: {e}"
+                )
+                for index, asset, image_data, asset_start_time in inference_items:
+                    try:
+                        predictions = self.tagging_engine.predict_tags(image_data)
+                        results[index] = self._apply_predictions(
+                            asset,
+                            predictions,
+                            asset_start_time,
+                        )
+                    except Exception as item_error:
+                        results[index] = self._failed_result(
+                            asset.id,
+                            asset_start_time,
+                            item_error,
+                        )
+
+        if any(result is None for result in results):
+            raise ProcessorError("Batch processing did not produce every result")
         
         batch_time = time.time() - start_time
         
@@ -228,6 +400,7 @@ class ImmichAutoTagger:
         # Immich tags belong to a user. Resolve the marker again whenever the
         # API key changes instead of reusing the first library's tag ID.
         self._initialize_processed_tag()
+        self._initialize_content_rating_tags()
     
     def get_unprocessed_assets(self, limit: Optional[int] = None) -> List[Asset]:
         """Get eligible image assets that need processing.

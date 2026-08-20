@@ -21,12 +21,36 @@ class Settings(BaseSettings):
     confidence_threshold: float = Field(default=0.35, env="CONFIDENCE_THRESHOLD", ge=0.0, le=1.0)
     batch_size: int = Field(default=250, env="BATCH_SIZE", gt=0, description="Maximum assets processed per batch")
     processed_tag_name: str = Field(default="auto:processed", env="PROCESSED_TAG_NAME")
+    content_rating_tag_name: str = Field(default="content-rating", env="CONTENT_RATING_TAG_NAME")
     target_albums: str = Field(default="", env="TARGET_ALBUMS")
     failure_timeout: int = Field(default=3, env="FAILURE_TIMEOUT", ge=0, description="Max retries for failed assets (0 = never retry)")
+    config_dir: str = Field(default="/config", env="CONFIG_DIR")
     
     # Model Configuration
     tagging_model: str = Field(default="wd14", env="TAGGING_MODEL")
-    model_cache_dir: str = Field(default="/app/models", env="MODEL_CACHE_DIR")
+    wd_model_repo: str = Field(
+        default="SmilingWolf/wd-swinv2-tagger-v3",
+        env="WD_MODEL_REPO",
+    )
+    model_cache_dir: str = Field(default="/config/models", env="MODEL_CACHE_DIR")
+    inference_batch_size: int = Field(
+        default=8,
+        env="INFERENCE_BATCH_SIZE",
+        gt=0,
+        description="Maximum images passed to ONNX Runtime at once",
+    )
+    character_threshold: float = Field(
+        default=0.9,
+        env="CHARACTER_THRESHOLD",
+        ge=0.0,
+        le=1.0,
+    )
+    onnx_intra_op_threads: int = Field(
+        default=0,
+        env="ONNX_INTRA_OP_THREADS",
+        ge=0,
+        description="ONNX worker threads (0 lets ONNX Runtime decide)",
+    )
     
     # Performance Configuration
     max_retries: int = Field(default=3, env="MAX_RETRIES", gt=0)
@@ -55,10 +79,22 @@ class Settings(BaseSettings):
     @validator("tagging_model")
     def validate_tagging_model(cls, v):
         """Ensure the tagging model is supported."""
-        supported_models = ["wd14", "deepdanbooru"]
+        supported_models = ["wd14"]
         if v.lower() not in supported_models:
             raise ValueError(f"TAGGING_MODEL must be one of: {supported_models}")
         return v.lower()
+
+    @validator("content_rating_tag_name")
+    def validate_content_rating_tag_name(cls, v):
+        """Ensure the content-rating parent is a single, usable tag name."""
+        value = v.strip()
+        if not value:
+            raise ValueError("CONTENT_RATING_TAG_NAME cannot be empty")
+        if "/" in value or any(char in value for char in ("\n", "\r", "\t")):
+            raise ValueError(
+                "CONTENT_RATING_TAG_NAME must be a single tag name without '/'"
+            )
+        return value
     
     @validator("log_level")
     def validate_log_level(cls, v):

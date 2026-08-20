@@ -2,7 +2,7 @@
 
 ### **Summary**
 
-A standalone service (“auto‑tagger”) that processes images/videos from an Immich instance, runs them through an anime-oriented tag inference model (e.g., WD‑14 or DeepDanbooru), then pushes the resulting tags back to Immich via its official API.
+A standalone service (“auto‑tagger”) that processes images from an Immich instance, runs them through the WD SwinV2 v3 anime tag model using ONNX Runtime, then pushes the resulting tags back to Immich via its official API.
 
 ### **Goals**
 
@@ -35,7 +35,7 @@ A standalone service (“auto‑tagger”) that processes images/videos from an 
 
 4. **Tagging Engine**
 
-   * Locally run anime tag models (WD‑14 or DeepDanbooru).
+   * Locally run the WD SwinV2 v3 ONNX anime tag model in dynamic batches.
    * Return a set of predicted tag names + confidence scores.
    * Filter tags using a confidence threshold (e.g., ≥ 0.35) and curated blacklist.
 

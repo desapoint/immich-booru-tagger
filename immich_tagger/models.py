@@ -11,6 +11,13 @@ class Tag(BaseModel):
     """Immich tag model."""
     id: str
     name: str
+    value: Optional[str] = None
+    parentId: Optional[str] = None
+
+    @property
+    def path(self) -> str:
+        """Return the complete hierarchical tag path."""
+        return self.value or self.name
 
 
 class Asset(BaseModel):
@@ -93,4 +100,4 @@ class BulkTagRequest(BaseModel):
 class CreateTagRequest(BaseModel):
     """Request for creating a new tag."""
     name: str
-    type: str = "OBJECT"
+    parentId: Optional[str] = None

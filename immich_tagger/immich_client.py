@@ -101,8 +101,17 @@ class ImmichClient:
         next_index = (self.current_library_index + 1) % len(self.library_configs)
         self.switch_to_library(next_index)
     
+    @staticmethod
+    def _parse_user_info(user_data: Dict) -> Dict:
+        """Return the stable subset of an Immich user response."""
+        return {
+            "id": user_data.get("id", "unknown"),
+            "name": user_data.get("name", "Unknown User"),
+            "email": user_data.get("email", "unknown@example.com"),
+        }
+
     def get_current_user_info(self) -> Dict:
-        """Get information about the current user for logging context."""
+        """Get information about the current processing user."""
         try:
             response = self._make_request(
                 method="GET",
@@ -110,16 +119,20 @@ class ImmichClient:
             )
             
             if response.status_code == 200:
-                user_data = response.json()
-                return {
-                    "id": user_data.get("id", "unknown"),
-                    "name": user_data.get("name", "Unknown User"),
-                    "email": user_data.get("email", "unknown@example.com")
-                }
+                return self._parse_user_info(response.json())
         except Exception as e:
             self.logger.debug(f"Failed to get user info: {e}")
         
         return {"id": "unknown", "name": "Unknown User", "email": "unknown@example.com"}
+
+    def get_user_info_for_api_key(self, api_key: str) -> Dict:
+        """Get user information without changing the active library."""
+        response = self._make_request_silent(
+            method="GET",
+            endpoint="/api/users/me",
+            api_key=api_key,
+        )
+        return self._parse_user_info(response.json())
     
     def _get_cache_properties(self):
         """Get cache properties for current library."""
@@ -152,6 +165,11 @@ class ImmichClient:
         # Silence httpx request logging
         import logging
         logging.getLogger("httpx").setLevel(logging.WARNING)
+
+    @staticmethod
+    def _tag_cache_key(tag: Tag) -> str:
+        """Build a case-insensitive cache key from a tag's complete path."""
+        return tag.path.casefold()
     
     def _make_request(
         self, 
@@ -208,10 +226,12 @@ class ImmichClient:
         method: str, 
         endpoint: str, 
         params: Optional[Dict[str, Any]] = None,
-        json_data: Optional[Dict[str, Any]] = None
+        json_data: Optional[Dict[str, Any]] = None,
+        api_key: Optional[str] = None,
     ) -> Any:
         """Make an HTTP request without logging (for health checks)."""
         url = f"{self.base_url}{endpoint}"
+        headers = {"X-API-Key": api_key} if api_key else None
         
         for attempt in range(self.max_retries + 1):
             try:
@@ -219,7 +239,8 @@ class ImmichClient:
                     method=method,
                     url=url,
                     params=params,
-                    json=json_data
+                    json=json_data,
+                    headers=headers,
                 )
                 response.raise_for_status()
                 return response
@@ -582,7 +603,7 @@ class ImmichClient:
         
         # Update cache
         if use_cache:
-            self._tag_cache = {tag.name.lower(): tag for tag in tags}
+            self._tag_cache = {self._tag_cache_key(tag): tag for tag in tags}
             self._set_cache_properties(valid=True, timestamp=current_time)
             self.logger.debug("Updated tag cache", count=len(self._tag_cache))
         
@@ -596,17 +617,24 @@ class ImmichClient:
         response = self._make_request(
             method="POST",
             endpoint="/api/tags",
-            json_data=tag_request.dict()
+            json_data=tag_request.model_dump(exclude_none=True)
         )
         
         tag_data = response.json()
         tag = Tag(**tag_data)
         
         # Update cache immediately
-        self._tag_cache[tag.name.lower()] = tag
+        self._tag_cache[self._tag_cache_key(tag)] = tag
         
-        self.logger.debug("Created tag", tag_id=tag.id, name=tag.name)
+        self.logger.debug("Created tag", tag_id=tag.id, name=tag.path)
         return tag
+
+    def get_tag(self, tag_name: str) -> Optional[Tag]:
+        """Return an existing tag by its complete path, if present."""
+        cache_props = self._get_cache_properties()
+        if not cache_props['valid']:
+            self.get_all_tags(use_cache=True)
+        return self._tag_cache.get(tag_name.strip().casefold())
     
     def get_or_create_tag(self, tag_name: str) -> Tag:
         """Get an existing tag or create it if it doesn't exist."""
@@ -616,7 +644,7 @@ class ImmichClient:
             raise ValueError(f"Invalid tag name: '{tag_name}'")
         
         tag_name_clean = tag_name.strip()
-        tag_name_lower = tag_name_clean.lower()
+        tag_name_lower = tag_name_clean.casefold()
         
         # Ensure cache is populated
         cache_props = self._get_cache_properties()
@@ -652,6 +680,34 @@ class ImmichClient:
                     return self._tag_cache[tag_name_lower]
             
             # Re-raise the exception if we can't handle it
+            raise
+
+    def get_or_create_child_tag(self, parent: Tag, child_name: str) -> Tag:
+        """Get or create a true Immich child tag beneath ``parent``."""
+        if not self._is_valid_tag_name(child_name) or "/" in child_name:
+            raise ValueError(f"Invalid child tag name: '{child_name}'")
+
+        child_name_clean = child_name.strip()
+        child_path = f"{parent.path}/{child_name_clean}"
+        existing = self.get_tag(child_path)
+        if existing:
+            return existing
+
+        try:
+            return self.create_tag(
+                CreateTagRequest(
+                    name=child_name_clean,
+                    parentId=parent.id,
+                )
+            )
+        except Exception as e:
+            if "already exists" not in str(e).lower():
+                raise
+
+            self.invalidate_tag_cache()
+            existing = self.get_tag(child_path)
+            if existing:
+                return existing
             raise
     
     def _is_valid_tag_name(self, tag_name: str) -> bool:
@@ -697,7 +753,7 @@ class ImmichClient:
         
         # Check which tags exist in cache
         for tag_name in valid_tag_names:
-            tag_name_lower = tag_name.lower()
+            tag_name_lower = tag_name.casefold()
             if tag_name_lower in self._tag_cache:
                 result[tag_name] = self._tag_cache[tag_name_lower]
                 performance_monitor.record_cache_hit()
@@ -721,7 +777,7 @@ class ImmichClient:
                         # Refresh cache and try to find the tag
                         self.invalidate_tag_cache()
                         self.get_all_tags(use_cache=True)
-                        tag_name_lower = tag_name.lower()
+                        tag_name_lower = tag_name.casefold()
                         if tag_name_lower in self._tag_cache:
                             result[tag_name] = self._tag_cache[tag_name_lower]
                             self.logger.debug(f"Found existing tag after cache refresh: {tag_name}")
@@ -761,6 +817,23 @@ class ImmichClient:
             "Bulk tagged assets",
             asset_count=len(asset_ids),
             tag_count=len(tag_ids)
+        )
+
+    def bulk_untag_assets(self, tag_id: str, asset_ids: List[str]) -> None:
+        """Remove one tag from a batch of assets."""
+        if not asset_ids:
+            return
+
+        self._make_request(
+            method="DELETE",
+            endpoint=f"/api/tags/{tag_id}/assets",
+            json_data={"ids": asset_ids},
+        )
+
+        self.logger.debug(
+            "Bulk untagged assets",
+            tag_id=tag_id,
+            asset_count=len(asset_ids),
         )
     
     def tag_single_asset(self, asset_id: str, tag_ids: List[str]) -> None:
@@ -820,6 +893,37 @@ class ImmichClient:
             )
         
         return assets
+
+    def get_asset_ids_with_tag(self, tag_id: str) -> List[str]:
+        """Return every asset ID associated with a tag."""
+        asset_ids = []
+        for asset_data in self._iter_metadata_asset_items(
+            {"tagIds": [tag_id]},
+        ):
+            asset_id = asset_data.get("id")
+            if not asset_id:
+                raise ImmichAPIError(
+                    "Tagged asset search returned an asset without an ID"
+                )
+            asset_ids.append(asset_id)
+        return asset_ids
+
+    def migrate_tag(self, source: Tag, destination: Tag, batch_size: int = 250) -> int:
+        """Move all asset associations to another tag, then delete the source."""
+        if batch_size < 1:
+            raise ValueError("Tag migration batch size must be positive")
+        if source.id == destination.id:
+            return 0
+
+        asset_ids = self.get_asset_ids_with_tag(source.id)
+        for offset in range(0, len(asset_ids), batch_size):
+            batch = asset_ids[offset:offset + batch_size]
+            self.bulk_tag_assets(batch, [destination.id])
+            self.bulk_untag_assets(source.id, batch)
+
+        self.delete_tag(source.id)
+        self.invalidate_tag_cache()
+        return len(asset_ids)
     
     def get_asset(self, asset_id: str) -> Asset:
         """Get a specific asset by ID."""
@@ -839,12 +943,8 @@ class ImmichClient:
         
         self.logger.debug("Removing tags from asset", asset_id=asset_id, tag_count=len(tag_ids))
         
-        # Use DELETE method to remove tags from asset
         for tag_id in tag_ids:
-            self._make_request(
-                method="DELETE",
-                endpoint=f"/api/tags/{tag_id}/assets/{asset_id}"
-            )
+            self.bulk_untag_assets(tag_id, [asset_id])
         
         self.logger.info("Removed tags from asset", asset_id=asset_id, tag_count=len(tag_ids))
     
