@@ -232,7 +232,12 @@ class ImmichAutoTagger:
             if self.failure_tracker and self.failure_tracker.check_for_external_changes():
                 self.logger.debug("🔄 Failure tracking data refreshed from external changes")
             
-            assets = self.immich_client.get_unprocessed_assets()
+            if not self.processed_tag:
+                raise ProcessorError("Processed tag has not been initialized")
+
+            assets = self.immich_client.get_unprocessed_assets(
+                processed_tag_id=self.processed_tag.id
+            )
             
             if not assets:
                 library_name = self.immich_client.current_library_name
