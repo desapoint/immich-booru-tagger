@@ -45,6 +45,12 @@ class Settings(BaseSettings):
         gt=0,
         description="Maximum images passed to ONNX Runtime at once",
     )
+    download_workers: int = Field(
+        default=4,
+        env="DOWNLOAD_WORKERS",
+        gt=0,
+        description="Concurrent thumbnail downloads within an inference chunk",
+    )
     character_threshold: float = Field(
         default=0.9,
         env="CHARACTER_THRESHOLD",

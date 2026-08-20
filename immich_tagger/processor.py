@@ -4,6 +4,7 @@ Main processor for the Immich Auto-Tagger service.
 
 import gc
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
 from .immich_client import ImmichClient
 from .tagging_engine import create_tagging_engine
@@ -264,20 +265,48 @@ class ImmichAutoTagger:
         downloaded_items = []
         failed_results = {}
 
-        for index, asset, asset_start_time in inference_items:
+        def download_item(item):
+            index, asset, asset_start_time = item
             try:
                 image_data = self.immich_client.download_asset(
                     asset.id,
                     use_thumbnail=True,
                 )
-                downloaded_items.append(
-                    (index, asset, image_data, asset_start_time)
+                return (
+                    index,
+                    asset,
+                    image_data,
+                    asset_start_time,
+                    None,
                 )
             except Exception as e:
+                return index, asset, None, asset_start_time, e
+
+        max_workers = min(settings.download_workers, len(inference_items))
+        with ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="asset-download",
+        ) as executor:
+            # executor.map runs concurrently but yields in input order, keeping
+            # model inputs and final results deterministic.
+            downloaded = executor.map(download_item, inference_items)
+            for (
+                index,
+                asset,
+                image_data,
+                asset_start_time,
+                error,
+            ) in downloaded:
+                if error is None:
+                    downloaded_items.append(
+                        (index, asset, image_data, asset_start_time)
+                    )
+                    continue
+
                 failed_results[index] = self._failed_result(
                     asset.id,
                     asset_start_time,
-                    e,
+                    error,
                 )
 
         return downloaded_items, failed_results

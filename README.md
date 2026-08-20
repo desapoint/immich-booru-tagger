@@ -45,6 +45,7 @@ python -m immich_tagger.main
 | `BATCH_SIZE` | Assets downloaded per processing cycle | `250` |
 | `MAX_BATCHES_PER_RUN` | Maximum batches across all libraries in one scheduled run (`0` = unlimited) | `0` |
 | `INFERENCE_BATCH_SIZE` | Images evaluated in one ONNX call | `8` |
+| `DOWNLOAD_WORKERS` | Concurrent thumbnail downloads within each inference chunk | `4` |
 | `PROCESSED_TAG_NAME` | Marker used to prevent reprocessing | `auto:processed` |
 | `CONTENT_RATING_TAG_NAME` | Parent for hierarchical content ratings | `content-rating` |
 | `TARGET_ALBUMS` | Comma-separated album names to process | Empty |
@@ -62,7 +63,9 @@ Optional model tuning:
 You do not need to add these optional variables to an existing Unraid Compose
 file. The image defaults are suitable for normal use. Start with
 `INFERENCE_BATCH_SIZE=8`; lower it if memory is constrained, or raise it
-gradually if the host has spare RAM and CPU capacity.
+gradually if the host has spare RAM and CPU capacity. `DOWNLOAD_WORKERS=4`
+keeps network concurrency conservative; raise it only if Immich and the network
+have spare capacity.
 
 When `UNLOAD_MODEL_AFTER_RUN=true`, the scheduler releases the ONNX session
 after a complete multi-library run if the next cron occurrence is at least 15

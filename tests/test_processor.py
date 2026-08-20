@@ -1,4 +1,6 @@
 import os
+import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -61,6 +63,56 @@ class FakeImmichClient:
 
 
 class ProcessorTests(unittest.TestCase):
+    def test_download_chunk_is_bounded_ordered_and_isolates_failures(self):
+        original_download_workers = settings.download_workers
+        settings.download_workers = 2
+        self.addCleanup(
+            setattr,
+            settings,
+            "download_workers",
+            original_download_workers,
+        )
+
+        processor = ImmichAutoTagger.__new__(ImmichAutoTagger)
+        processor.metrics = Mock()
+        processor.metrics.metrics = {"failures": 0}
+        processor.immich_client = Mock()
+
+        active_downloads = 0
+        peak_downloads = 0
+        counter_lock = threading.Lock()
+
+        def download_asset(asset_id, use_thumbnail):
+            nonlocal active_downloads, peak_downloads
+            with counter_lock:
+                active_downloads += 1
+                peak_downloads = max(peak_downloads, active_downloads)
+            try:
+                time.sleep(0.02)
+                if asset_id == "asset-2":
+                    raise RuntimeError("download failed")
+                return asset_id.encode()
+            finally:
+                with counter_lock:
+                    active_downloads -= 1
+
+        processor.immich_client.download_asset.side_effect = download_asset
+        items = []
+        for index in range(3):
+            asset = Mock(spec=Asset)
+            asset.id = f"asset-{index + 1}"
+            items.append((index, asset, time.time()))
+
+        downloaded, failed = processor._download_inference_chunk(items)
+
+        self.assertEqual(peak_downloads, 2)
+        self.assertEqual(
+            [(item[0], item[2]) for item in downloaded],
+            [(0, b"asset-1"), (2, b"asset-3")],
+        )
+        self.assertEqual(list(failed), [1])
+        self.assertIn("download failed", failed[1].error)
+
     def test_model_load_and_unload_lifecycle_is_logged(self):
         processor = ImmichAutoTagger.__new__(ImmichAutoTagger)
         processor.logger = Mock()
