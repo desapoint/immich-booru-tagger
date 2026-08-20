@@ -76,8 +76,10 @@ logged at `INFO`; downloaded files remain cached under `/config/models`.
 `MAX_BATCHES_PER_RUN` bounds the work performed by each scheduler occurrence.
 For example, `BATCH_SIZE=250` and `MAX_BATCHES_PER_RUN=4` process at most
 1,000 assets per run. The allowance is shared across configured libraries;
-remaining eligible images resume at the next scheduled run. Runs are guarded
-so a second trigger is skipped while an earlier run is still active.
+the scheduler processes one batch per library in round-robin passes and rotates
+the starting library between capped runs. Remaining eligible images resume at
+the next scheduled run. Runs are guarded so a second trigger is skipped while
+an earlier run is still active.
 
 The run guard combines an in-process lock with an advisory lock at
 `/config/.processing-run.lock`. This prevents overlapping scheduler containers

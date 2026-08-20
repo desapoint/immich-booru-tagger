@@ -27,6 +27,7 @@ class Scheduler:
         self.timezone = pytz.timezone(settings.timezone)
         self.last_run_time: Optional[datetime] = None
         self._processing_lock = ProcessingRunLock(purpose="scheduler")
+        self._next_library_index = 0
         
     def _get_next_run_time(self) -> datetime:
         """Get the next scheduled run time based on cron expression."""
@@ -111,67 +112,130 @@ class Scheduler:
             # Update last run time
             self.last_run_time = datetime.now(self.timezone)
             
-            total_processed = 0
-            total_tags = 0
             batches_processed = 0
             batch_limit_reached = False
             library_configs = self.processor.immich_client.library_configs
-            
-            for i, library_config in enumerate(library_configs):
-                library_name = library_config["name"]
-                
-                try:
-                    # Get user info for this library
-                    self.processor.immich_client.switch_to_library(i)
-                    user_info = self.processor.immich_client.get_current_user_info()
-                    
-                    self.logger.info(f"🏛️ Processing library '{library_name}' ({i+1}/{len(library_configs)}) - User: {user_info['name']} ({user_info['email']})")
-                    
-                    # Set current library in processor
-                    self.processor.set_current_library(library_name)
-                    
-                    # Process this library until complete or this run reaches
-                    # its global batch allowance.
-                    library_start_processed = self.processor.library_metrics.get(library_name, {}).get("processed_assets", 0)
-                    library_start_tags = self.processor.library_metrics.get(library_name, {}).get("assigned_tags", 0)
-                    library_complete = False
-                    
-                    while True:
-                        if (
-                            settings.max_batches_per_run > 0
-                            and batches_processed >= settings.max_batches_per_run
-                        ):
-                            batch_limit_reached = True
-                            break
+            library_count = len(library_configs)
 
+            if library_count == 0:
+                self.logger.warning("⚠️  No libraries configured for processing")
+                return True
+
+            start_index = self._next_library_index % library_count
+            ordered_indices = [
+                (start_index + offset) % library_count
+                for offset in range(library_count)
+            ]
+            library_states = {
+                index: {
+                    "complete": False,
+                    "failed": False,
+                    "initialized": False,
+                }
+                for index in range(library_count)
+            }
+            library_starts = {
+                config["name"]: {
+                    "processed_assets": self.processor.library_metrics.get(
+                        config["name"], {}
+                    ).get("processed_assets", 0),
+                    "assigned_tags": self.processor.library_metrics.get(
+                        config["name"], {}
+                    ).get("assigned_tags", 0),
+                }
+                for config in library_configs
+            }
+            last_batch_library_index = None
+
+            while any(
+                not state["complete"] and not state["failed"]
+                for state in library_states.values()
+            ):
+                for library_index in ordered_indices:
+                    state = library_states[library_index]
+                    if state["complete"] or state["failed"]:
+                        continue
+
+                    if (
+                        settings.max_batches_per_run > 0
+                        and batches_processed >= settings.max_batches_per_run
+                    ):
+                        batch_limit_reached = True
+                        break
+
+                    library_config = library_configs[library_index]
+                    library_name = library_config["name"]
+
+                    try:
+                        self.processor.immich_client.switch_to_library(
+                            library_index
+                        )
+                        if not state["initialized"]:
+                            user_info = (
+                                self.processor.immich_client
+                                .get_current_user_info()
+                            )
+                            self.logger.info(
+                                f"🏛️ Processing library '{library_name}' "
+                                f"({library_index + 1}/{library_count}) - "
+                                f"User: {user_info['name']} "
+                                f"({user_info['email']})"
+                            )
+                            state["initialized"] = True
+
+                        self.processor.set_current_library(library_name)
                         cycle_result = self.processor.run_processing_cycle()
-                        if not cycle_result:
-                            library_complete = True
-                            break
-                        batches_processed += 1
-                    
-                    # Calculate library totals
-                    library_processed = self.processor.library_metrics.get(library_name, {}).get("processed_assets", 0) - library_start_processed
-                    library_tags = self.processor.library_metrics.get(library_name, {}).get("assigned_tags", 0) - library_start_tags
-                    
-                    total_processed += library_processed
-                    total_tags += library_tags
-                    
-                    if library_complete:
-                        self.logger.info(f"✅ Library '{library_name}' complete: {library_processed} assets processed, {library_tags} tags assigned")
-                    else:
-                        self.logger.info(
-                            f"⏸️  Library '{library_name}' paused: "
-                            f"{library_processed} assets processed, "
-                            f"{library_tags} tags assigned"
+                        if cycle_result:
+                            batches_processed += 1
+                            last_batch_library_index = library_index
+                        else:
+                            state["complete"] = True
+                    except Exception as e:
+                        state["failed"] = True
+                        self.logger.error(
+                            f"❌ Error processing library "
+                            f"'{library_name}': {e}"
                         )
 
-                    if batch_limit_reached:
-                        break
-                    
-                except Exception as e:
-                    self.logger.error(f"❌ Error processing library '{library_name}': {e}")
-                    continue
+                if batch_limit_reached:
+                    break
+
+            if batch_limit_reached and last_batch_library_index is not None:
+                self._next_library_index = (
+                    last_batch_library_index + 1
+                ) % library_count
+
+            total_processed = 0
+            total_tags = 0
+            for library_index, library_config in enumerate(library_configs):
+                library_name = library_config["name"]
+                current_metrics = self.processor.library_metrics.get(
+                    library_name, {}
+                )
+                library_processed = current_metrics.get(
+                    "processed_assets", 0
+                ) - library_starts[library_name]["processed_assets"]
+                library_tags = current_metrics.get(
+                    "assigned_tags", 0
+                ) - library_starts[library_name]["assigned_tags"]
+                total_processed += library_processed
+                total_tags += library_tags
+
+                state = library_states[library_index]
+                if state["complete"]:
+                    status_icon = "✅"
+                    status = "complete"
+                elif state["failed"]:
+                    status_icon = "❌"
+                    status = "failed"
+                else:
+                    status_icon = "⏸️"
+                    status = "paused"
+                self.logger.info(
+                    f"{status_icon} Library '{library_name}' {status}: "
+                    f"{library_processed} assets processed, "
+                    f"{library_tags} tags assigned"
+                )
             
             if batch_limit_reached:
                 self.logger.info(
