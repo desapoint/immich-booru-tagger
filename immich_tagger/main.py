@@ -6,6 +6,7 @@ import asyncio
 import sys
 import argparse
 from typing import Optional
+from .build_info import get_build_info
 from .processor import ImmichAutoTagger, ProcessorError
 from .config import settings
 from .logging import setup_logging, get_logger
@@ -165,6 +166,13 @@ def main():
     
     # Parse arguments
     args = parse_arguments()
+
+    build_info = get_build_info()
+    logger.info(
+        "🏷️  Build identity: "
+        f"version={build_info['version']}, "
+        f"revision={build_info['revision']}"
+    )
     
     # Override batch size if specified
     if args.batch_size:

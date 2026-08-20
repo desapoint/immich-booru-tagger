@@ -1,8 +1,13 @@
 FROM python:3.11-slim
 
+ARG APP_VERSION=development
+ARG GIT_REVISION=unknown
+
 LABEL org.opencontainers.image.title="Immich Booru Tagger"
 LABEL org.opencontainers.image.description="AI-powered WD14/Booru tagging for Immich"
 LABEL org.opencontainers.image.source="https://github.com/desapoint/immich-booru-tagger"
+LABEL org.opencontainers.image.version="${APP_VERSION}"
+LABEL org.opencontainers.image.revision="${GIT_REVISION}"
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -11,7 +16,9 @@ ENV PYTHONUNBUFFERED=1 \
     CONFIG_DIR=/config \
     XDG_CACHE_HOME=/config/cache \
     HF_HOME=/config/huggingface \
-    MODEL_CACHE_DIR=/config/models
+    MODEL_CACHE_DIR=/config/models \
+    APP_VERSION=${APP_VERSION} \
+    GIT_REVISION=${GIT_REVISION}
 
 WORKDIR /app
 

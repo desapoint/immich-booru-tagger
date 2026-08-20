@@ -79,6 +79,20 @@ For example, `BATCH_SIZE=250` and `MAX_BATCHES_PER_RUN=4` process at most
 remaining eligible images resume at the next scheduled run. Runs are guarded
 so a second trigger is skipped while an earlier run is still active.
 
+### Verifying the running image
+
+Every published image reports its release identity at startup and through
+`/`, `/health`, and `/metrics`. The `revision` value is the exact Git commit
+used by GitHub Actions. For example:
+
+```bash
+curl http://your-unraid-host:8000/health
+docker inspect immich_booru_tagger --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
+```
+
+The revision in both outputs should match. Local source builds report
+`version=development` and `revision=unknown` unless build arguments are passed.
+
 ### Content ratings
 
 The tagger creates a dedicated hierarchy for WD14's four content ratings:

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from aiohttp import web
 
+from .build_info import get_build_info
 from .config import settings
 from .logging import get_logger
 from .models import HealthStatus
@@ -90,8 +91,11 @@ class HealthServer:
                 overall_healthy = False
                 self.connection_cache.pop(f"library_{index}", None)
 
+        build_info = get_build_info()
         health_status = HealthStatus(
             status="healthy" if overall_healthy else "unhealthy",
+            version=build_info["version"],
+            build=build_info,
             metrics={
                 "libraries": library_statuses,
                 "global": self.processor.get_metrics(),
@@ -124,6 +128,7 @@ class HealthServer:
             import psutil
 
             metrics = self.processor.get_metrics()
+            metrics["build"] = get_build_info()
             metrics.update(
                 {
                     "cpu_percent": psutil.cpu_percent(),
@@ -138,10 +143,12 @@ class HealthServer:
 
     async def root_handler(self, request):
         """Return basic service information."""
+        build_info = get_build_info()
         return web.json_response(
             {
                 "service": "Immich Auto-Tagger",
-                "version": "1.0.0",
+                "version": build_info["version"],
+                "build": build_info,
                 "endpoints": {
                     "/health": "Health check endpoint",
                     "/metrics": "Processing metrics",

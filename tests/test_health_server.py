@@ -1,6 +1,6 @@
 import os
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 os.environ.setdefault("IMMICH_BASE_URL", "http://immich.test")
@@ -26,10 +26,19 @@ class HealthServerTests(unittest.TestCase):
         ]
         server = HealthServer(processor)
 
-        healthy, payload = server._collect_health_response()
+        with patch.dict(
+            os.environ,
+            {"APP_VERSION": "v2.1.0", "GIT_REVISION": "abc123"},
+        ):
+            healthy, payload = server._collect_health_response()
 
         self.assertTrue(healthy)
         self.assertEqual(payload["status"], "healthy")
+        self.assertEqual(payload["version"], "v2.1.0")
+        self.assertEqual(
+            payload["build"],
+            {"version": "v2.1.0", "revision": "abc123"},
+        )
         self.assertEqual(
             processor.immich_client._make_request_silent.call_args_list[0].kwargs,
             {"method": "GET", "endpoint": "/api/tags", "api_key": "key-1"},
