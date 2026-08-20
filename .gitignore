@@ -179,3 +179,8 @@ processing_failures*.json
 .DS_Store
 Thumbs.db
 processing_failures.json
+
+# Local task planning (never versioned)
+/TODO.md
+/TASKS.md
+*.local/
