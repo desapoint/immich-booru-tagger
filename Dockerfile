@@ -1,37 +1,52 @@
 FROM python:3.11-slim
 
-# Set working directory
+LABEL org.opencontainers.image.title="Immich Booru Tagger"
+LABEL org.opencontainers.image.description="AI-powered WD14/Booru tagging for Immich"
+LABEL org.opencontainers.image.source="https://github.com/desapoint/immich-booru-tagger"
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app \
+    HOME=/config \
+    XDG_CACHE_HOME=/config/cache \
+    HF_HOME=/config/huggingface \
+    TORCH_HOME=/config/torch \
+    MODEL_CACHE_DIR=/config/models
+
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    libgl1 \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender1 \
-    libgomp1 \
+# Runtime dependencies + helpers used by the Unraid-compatible entrypoint.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        gosu \
+        tini \
+        passwd \
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender1 \
+        libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better caching
-COPY requirements.txt .
+# Copy dependencies separately so Docker can cache pip installs.
+COPY requirements.txt /app/requirements.txt
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Copy application code
-COPY . .
+# Copy application source.
+COPY . /app
 
-# Create non-root user for security
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
-USER appuser
+# Ensure startup script is executable.
+RUN chmod +x /app/docker-entrypoint.sh \
+    && mkdir -p /config
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:8000/health')" || exit 1
-
-# Expose port for health endpoint
 EXPOSE 8000
 
-# Run the application in scheduler mode (for Docker deployment)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD python -c "import requests; requests.get('http://localhost:8000/health', timeout=5).raise_for_status()" || exit 1
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/docker-entrypoint.sh"]
+
 CMD ["python", "-m", "immich_tagger.main", "--mode", "scheduler"]

@@ -163,14 +163,16 @@ cython_debug/
 #*.ipr
 
 # Project-specific
+data/
 models/
 logs/
 *.log
+processing_failures*.json
 .env.local
 .env.production
 
 # Docker
-.dockerignore
+#.dockerignore
 
 # OS-specific
 .DS_Store
