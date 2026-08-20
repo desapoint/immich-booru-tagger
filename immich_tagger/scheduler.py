@@ -3,7 +3,7 @@ Scheduler for continuous operation of the Immich Auto-Tagger.
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from croniter import croniter
 import pytz
@@ -11,6 +11,9 @@ import pytz
 from .config import settings
 from .logging import get_logger
 from .processor import ImmichAutoTagger
+
+
+MODEL_KEEP_LOADED_WINDOW = timedelta(minutes=15)
 
 
 class Scheduler:
@@ -53,6 +56,38 @@ class Scheduler:
     async def _run_processing_cycle(self):
         """Run synchronous multi-library processing outside the event loop."""
         await asyncio.to_thread(self._run_processing_cycle_sync)
+
+    def _manage_model_retention(self):
+        """Unload the model unless another scheduled run is less than 15m away."""
+        if (
+            not settings.unload_model_after_run
+            or not self.processor.is_tagging_engine_loaded
+        ):
+            return
+
+        try:
+            now = datetime.now(self.timezone)
+            next_run = self._get_next_run_time()
+            time_until_next_run = next_run - now
+            minutes_until_next_run = max(
+                0.0,
+                time_until_next_run.total_seconds() / 60,
+            )
+
+            if timedelta(0) <= time_until_next_run < MODEL_KEEP_LOADED_WINDOW:
+                self.logger.info(
+                    "🧠 Keeping ONNX model loaded: next run is in "
+                    f"{minutes_until_next_run:.1f} minutes (< 15 minutes)"
+                )
+                return
+
+            self.logger.info(
+                "💤 Next run is in "
+                f"{minutes_until_next_run:.1f} minutes; unloading ONNX model"
+            )
+            self.processor.unload_tagging_engine()
+        except Exception as e:
+            self.logger.error(f"❌ Failed to manage ONNX model retention: {e}")
 
     def _run_processing_cycle_sync(self):
         """Run a processing cycle for all libraries."""
@@ -105,6 +140,8 @@ class Scheduler:
             
         except Exception as e:
             self.logger.error(f"❌ Error during scheduled processing cycle: {e}")
+        finally:
+            self._manage_model_retention()
     
     async def _scheduler_loop(self):
         """Main scheduler loop."""

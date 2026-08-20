@@ -84,6 +84,21 @@ class WD14ONNXTaggingEngineTests(unittest.TestCase):
             [prediction.name for prediction in results[0]],
             ["character_name", "questionable", "blue_hair"],
         )
+        inference_logs = [
+            call.args[0]
+            for call in self.engine.logger.info.call_args_list
+        ]
+        self.assertEqual(len(inference_logs), 2)
+        self.assertTrue(
+            inference_logs[0].startswith(
+                "🧠 Inference batch 1/2 complete: 2 images in "
+            )
+        )
+        self.assertTrue(
+            inference_logs[1].startswith(
+                "🧠 Inference batch 2/2 complete: 1 image in "
+            )
+        )
 
     def test_transparent_pixels_are_composited_on_white_and_converted_to_bgr(self):
         prepared = self.engine._prepare_image(

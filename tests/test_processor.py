@@ -60,15 +60,52 @@ class FakeImmichClient:
 
 
 class ProcessorTests(unittest.TestCase):
+    def test_model_load_and_unload_lifecycle_is_logged(self):
+        processor = ImmichAutoTagger.__new__(ImmichAutoTagger)
+        processor.logger = Mock()
+        processor.tagging_engine = None
+        first_engine = Mock()
+        second_engine = Mock()
+
+        with (
+            patch(
+                "immich_tagger.processor.create_tagging_engine",
+                side_effect=[first_engine, second_engine],
+            ) as create_engine,
+            patch("immich_tagger.processor.gc.collect") as collect,
+        ):
+            self.assertIs(processor._get_tagging_engine(), first_engine)
+            self.assertTrue(processor.is_tagging_engine_loaded)
+            self.assertTrue(processor.unload_tagging_engine())
+            self.assertFalse(processor.is_tagging_engine_loaded)
+            self.assertIs(processor._get_tagging_engine(), second_engine)
+
+        self.assertEqual(create_engine.call_count, 2)
+        collect.assert_called_once_with()
+        self.assertEqual(
+            [call.args[0] for call in processor.logger.info.call_args_list],
+            [
+                "📦 Loading ONNX model into memory",
+                "📤 Unloading ONNX model from memory",
+                "✅ ONNX model unloaded from memory",
+                "📦 Loading ONNX model into memory",
+            ],
+        )
+
     def test_processed_marker_is_resolved_per_api_key(self):
         client = FakeImmichClient()
 
         with (
             patch("immich_tagger.processor.ImmichClient", return_value=client),
-            patch("immich_tagger.processor.create_tagging_engine", return_value=Mock()),
+            patch(
+                "immich_tagger.processor.create_tagging_engine",
+                return_value=Mock(),
+            ) as create_engine,
             patch("immich_tagger.processor.FailureTracker", return_value=Mock()),
         ):
             processor = ImmichAutoTagger()
+
+            create_engine.assert_not_called()
 
             self.assertEqual(processor.processed_tag.id, "key-1-auto:processed")
 
@@ -208,6 +245,14 @@ class ProcessorTests(unittest.TestCase):
             [b"one", b"two"]
         )
         processor.tagging_engine.predict_tags.assert_not_called()
+        self.assertTrue(
+            any(
+                call.args[0].startswith(
+                    "📥 Batch download complete: 2/2 images ready in "
+                )
+                for call in processor.logger.info.call_args_list
+            )
+        )
 
     def test_failed_batch_inference_retries_each_image_individually(self):
         processor = ImmichAutoTagger.__new__(ImmichAutoTagger)

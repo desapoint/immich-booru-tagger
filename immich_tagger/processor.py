@@ -2,6 +2,7 @@
 Main processor for the Immich Auto-Tagger service.
 """
 
+import gc
 import time
 from typing import Dict, List, Optional
 from .immich_client import ImmichClient
@@ -28,7 +29,7 @@ class ImmichAutoTagger:
         self.logger = get_logger("processor")
         self.metrics = MetricsLogger()
         self.immich_client = ImmichClient()
-        self.tagging_engine = create_tagging_engine()
+        self.tagging_engine = None
         self.processed_tag: Optional[Tag] = None
         self.processed_tags: Dict[str, Tag] = {}
         self.content_rating_tags: Dict[str, Dict[str, Tag]] = {}
@@ -44,6 +45,35 @@ class ImmichAutoTagger:
         
         # Initialize tracking and managed tags for the first library.
         self.set_current_library(self.immich_client.current_library_name)
+
+    @property
+    def is_tagging_engine_loaded(self) -> bool:
+        """Return whether the ONNX session is currently resident in memory."""
+        return self.tagging_engine is not None
+
+    def _get_tagging_engine(self):
+        """Load the model on first use and reuse it until explicitly unloaded."""
+        if self.tagging_engine is None:
+            self.logger.info("📦 Loading ONNX model into memory")
+            try:
+                self.tagging_engine = create_tagging_engine()
+            except Exception as e:
+                self.logger.error(f"❌ Failed to load ONNX model: {e}")
+                raise
+        return self.tagging_engine
+
+    def unload_tagging_engine(self) -> bool:
+        """Release the active ONNX session while preserving its disk cache."""
+        if self.tagging_engine is None:
+            return False
+
+        self.logger.info("📤 Unloading ONNX model from memory")
+        tagging_engine = self.tagging_engine
+        self.tagging_engine = None
+        del tagging_engine
+        gc.collect()
+        self.logger.info("✅ ONNX model unloaded from memory")
+        return True
     
     def _initialize_processed_tag(self):
         """Select or initialize the processed tag for the current library."""
@@ -224,7 +254,7 @@ class ImmichAutoTagger:
 
         try:
             image_data = self.immich_client.download_asset(asset.id, use_thumbnail=True)
-            predictions = self.tagging_engine.predict_tags(image_data)
+            predictions = self._get_tagging_engine().predict_tags(image_data)
             return self._apply_predictions(asset, predictions, start_time)
         except Exception as e:
             return self._failed_result(asset.id, start_time, e)
@@ -239,7 +269,8 @@ class ImmichAutoTagger:
             self.immich_client.get_all_tags(use_cache=True)
         except Exception as e:
             self.logger.warning(f"⚠️  Failed to pre-warm tag cache: {str(e)}")
-        
+
+        download_start_time = time.time()
         inference_items = []
         for index, asset in enumerate(assets):
             asset_start_time = time.time()
@@ -275,45 +306,62 @@ class ImmichAutoTagger:
                     e,
                 )
 
+        download_time = time.time() - download_start_time
+        self.logger.info(
+            "📥 Batch download complete: "
+            f"{len(inference_items)}/{len(assets)} images ready "
+            f"in {download_time:.1f}s"
+        )
+
         if inference_items:
             try:
-                prediction_batches = self.tagging_engine.predict_tags_batch(
-                    [item[2] for item in inference_items]
-                )
-                if len(prediction_batches) != len(inference_items):
-                    raise ProcessorError(
-                        "Tagging engine returned an unexpected batch size"
-                    )
-
-                for item, predictions in zip(
-                    inference_items,
-                    prediction_batches,
-                ):
-                    index, asset, _, asset_start_time = item
-                    results[index] = self._apply_predictions(
-                        asset,
-                        predictions,
-                        asset_start_time,
-                    )
+                tagging_engine = self._get_tagging_engine()
             except Exception as e:
-                self.logger.warning(
-                    "⚠️  Batched inference failed; retrying images "
-                    f"individually: {e}"
-                )
-                for index, asset, image_data, asset_start_time in inference_items:
-                    try:
-                        predictions = self.tagging_engine.predict_tags(image_data)
+                for index, asset, _, asset_start_time in inference_items:
+                    results[index] = self._failed_result(
+                        asset.id,
+                        asset_start_time,
+                        e,
+                    )
+            else:
+                try:
+                    prediction_batches = tagging_engine.predict_tags_batch(
+                        [item[2] for item in inference_items]
+                    )
+                    if len(prediction_batches) != len(inference_items):
+                        raise ProcessorError(
+                            "Tagging engine returned an unexpected batch size"
+                        )
+
+                    for item, predictions in zip(
+                        inference_items,
+                        prediction_batches,
+                    ):
+                        index, asset, _, asset_start_time = item
                         results[index] = self._apply_predictions(
                             asset,
                             predictions,
                             asset_start_time,
                         )
-                    except Exception as item_error:
-                        results[index] = self._failed_result(
-                            asset.id,
-                            asset_start_time,
-                            item_error,
-                        )
+                except Exception as e:
+                    self.logger.warning(
+                        "⚠️  Batched inference failed; retrying images "
+                        f"individually: {e}"
+                    )
+                    for index, asset, image_data, asset_start_time in inference_items:
+                        try:
+                            predictions = tagging_engine.predict_tags(image_data)
+                            results[index] = self._apply_predictions(
+                                asset,
+                                predictions,
+                                asset_start_time,
+                            )
+                        except Exception as item_error:
+                            results[index] = self._failed_result(
+                                asset.id,
+                                asset_start_time,
+                                item_error,
+                            )
 
         if any(result is None for result in results):
             raise ProcessorError("Batch processing did not produce every result")

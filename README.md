@@ -56,11 +56,18 @@ Optional model tuning:
 | `WD_MODEL_REPO` | Hugging Face repository containing `model.onnx` and `selected_tags.csv` | `SmilingWolf/wd-swinv2-tagger-v3` |
 | `MODEL_CACHE_DIR` | Downloaded model cache path | `/config/models` |
 | `ONNX_INTRA_OP_THREADS` | ONNX CPU worker threads (`0` lets the runtime decide) | `0` |
+| `UNLOAD_MODEL_AFTER_RUN` | Release model memory between scheduled runs, except when the next run is under 15 minutes away | `false` |
 
 You do not need to add these optional variables to an existing Unraid Compose
 file. The image defaults are suitable for normal use. Start with
 `INFERENCE_BATCH_SIZE=8`; lower it if memory is constrained, or raise it
 gradually if the host has spare RAM and CPU capacity.
+
+When `UNLOAD_MODEL_AFTER_RUN=true`, the scheduler releases the ONNX session
+after a complete multi-library run if the next cron occurrence is at least 15
+minutes away. It keeps the session resident when the next run is less than 15
+minutes away. Model loading, retention decisions, and unload completion are
+logged at `INFO`; downloaded files remain cached under `/config/models`.
 
 ### Content ratings
 

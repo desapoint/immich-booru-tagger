@@ -3,6 +3,7 @@
 import csv
 import io
 import os
+import time
 from typing import List
 
 import numpy as np
@@ -255,7 +256,14 @@ class WD14ONNXTaggingEngine(BaseTaggingEngine):
 
         try:
             results = []
-            for offset in range(0, len(images), self.inference_batch_size):
+            total_batches = (
+                len(images) + self.inference_batch_size - 1
+            ) // self.inference_batch_size
+            for batch_number, offset in enumerate(
+                range(0, len(images), self.inference_batch_size),
+                start=1,
+            ):
+                inference_start_time = time.perf_counter()
                 image_batch = images[offset:offset + self.inference_batch_size]
                 model_input = np.stack(
                     [self._prepare_image(image_data) for image_data in image_batch]
@@ -273,6 +281,13 @@ class WD14ONNXTaggingEngine(BaseTaggingEngine):
                 results.extend(
                     self._predictions_from_scores(scores)
                     for scores in model_output
+                )
+                inference_time = time.perf_counter() - inference_start_time
+                image_label = "image" if len(image_batch) == 1 else "images"
+                self.logger.info(
+                    f"🧠 Inference batch {batch_number}/{total_batches} "
+                    f"complete: {len(image_batch)} {image_label} in "
+                    f"{inference_time:.1f}s"
                 )
 
             self.logger.debug(

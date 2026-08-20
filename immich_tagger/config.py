@@ -51,6 +51,11 @@ class Settings(BaseSettings):
         ge=0,
         description="ONNX worker threads (0 lets ONNX Runtime decide)",
     )
+    unload_model_after_run: bool = Field(
+        default=False,
+        env="UNLOAD_MODEL_AFTER_RUN",
+        description="Release the ONNX model between distant scheduled runs",
+    )
     
     # Performance Configuration
     max_retries: int = Field(default=3, env="MAX_RETRIES", gt=0)
