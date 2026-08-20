@@ -4,7 +4,7 @@ Data models for the Immich Auto-Tagger service.
 
 from typing import List, Optional, Dict, Any
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Tag(BaseModel):
@@ -50,6 +50,16 @@ class Asset(BaseModel):
     updatedAt: datetime
     # Tags for checking if already processed
     tags: Optional[List[Tag]] = []
+
+    @field_validator("duration", mode="before")
+    @classmethod
+    def normalize_duration(cls, value):
+        """Normalize numeric durations returned by some Immich versions."""
+        if value is None or isinstance(value, str):
+            return value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return str(value)
+        return value
 
 
 class TagPrediction(BaseModel):

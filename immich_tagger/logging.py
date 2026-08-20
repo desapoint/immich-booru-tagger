@@ -8,6 +8,31 @@ from rich.logging import RichHandler
 from .config import settings
 
 
+STANDARD_LOGGING_KWARGS = {
+    "exc_info",
+    "extra",
+    "stack_info",
+    "stacklevel",
+}
+
+
+class ContextLoggerAdapter(logging.LoggerAdapter):
+    """Allow concise structured context with the standard logging backend."""
+
+    def process(self, msg, kwargs):
+        context = {
+            key: kwargs.pop(key)
+            for key in tuple(kwargs)
+            if key not in STANDARD_LOGGING_KWARGS
+        }
+        if context:
+            details = ", ".join(
+                f"{key}={value!r}" for key, value in context.items()
+            )
+            msg = f"{msg} | {details}"
+        return msg, kwargs
+
+
 def setup_logging() -> None:
     """Configure clean, simple logging output."""
     
@@ -37,7 +62,7 @@ def setup_logging() -> None:
 
 def get_logger(name: str):
     """Get a standard logger instance."""
-    return logging.getLogger(name)
+    return ContextLoggerAdapter(logging.getLogger(name), {})
 
 
 class MetricsLogger:
