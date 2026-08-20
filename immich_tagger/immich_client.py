@@ -289,17 +289,173 @@ class ImmichClient:
         self.logger.info(f"✅ Library '{library_name}': Found {len(assets)} untagged image assets (of {total_available} total available)")
         return assets
     
-    def get_unprocessed_assets(self, processed_tag_id: Optional[str] = None, limit: int = 250) -> List[Asset]:
-        """Get unprocessed assets - now simplified to use metadata search.
-        
-        Args:
-            processed_tag_id: Ignored - we use tagIds:null to get untagged assets
-            limit: Ignored - API returns natural batches of ~250
-            
-        Returns:
-            List of assets that have no tags (and thus need processing)
+    def get_unprocessed_assets(
+        self,
+        processed_tag_id: Optional[str] = None,
+        limit: int = 250
+    ) -> List[Asset]:
         """
-        return self.get_untagged_assets()
+        TARGET_ALBUMS behavior:
+
+          empty
+            -> preserve original behavior:
+               return assets with no tags at all
+
+          Anime
+            -> return untreated assets in Anime
+
+          Anime,Hentai
+            -> return untreated assets in Anime OR Hentai
+
+        When album filtering is enabled, an asset is considered treated
+        when it has processed_tag_id.
+        """
+
+        target_album_names = [
+            name.strip()
+            for name in settings.target_albums.split(",")
+            if name.strip()
+        ]
+
+        # Preserve the original tagger behavior when no albums are targeted.
+        if not target_album_names:
+            return self.get_untagged_assets()
+
+        if not processed_tag_id:
+            raise ImmichAPIError("processed_tag_id is required")
+
+        library_name = self.current_library_name
+
+        # Resolve configured album names.
+        response = self._make_request(
+            method="GET",
+            endpoint="/api/albums"
+        )
+
+        albums = response.json()
+
+        albums_by_name = {}
+
+        for album in albums:
+            name = album.get("albumName", "")
+            album_id = album.get("id")
+
+            if name and album_id:
+                albums_by_name.setdefault(
+                    name.casefold(),
+                    []
+                ).append(album_id)
+
+        album_ids = []
+        missing_albums = []
+
+        for requested_name in target_album_names:
+            matches = albums_by_name.get(
+                requested_name.casefold(),
+                []
+            )
+
+            if not matches:
+                missing_albums.append(requested_name)
+                continue
+
+            album_ids.extend(matches)
+
+        if missing_albums:
+            raise ImmichAPIError(
+                "The following target albums were not found: "
+                + ", ".join(missing_albums)
+            )
+
+        album_ids = list(dict.fromkeys(album_ids))
+
+        self.logger.info(
+            f"🎯 Library '{library_name}': "
+            f"Filtering to albums: "
+            f"{', '.join(target_album_names)}"
+        )
+
+        assets = []
+        page = 1
+        page_size = 250
+
+        while len(assets) < limit:
+            response = self._make_request(
+                method="POST",
+                endpoint="/api/search/metadata",
+                json_data={
+                    "albumIds": album_ids,
+                    "type": "IMAGE",
+                    "page": page,
+                    "size": page_size
+                }
+            )
+
+            response_data = response.json()
+
+            if (
+                not isinstance(response_data, dict)
+                or "assets" not in response_data
+            ):
+                self.logger.error(
+                    f"❌ Library '{library_name}': "
+                    f"Unexpected metadata response"
+                )
+                return []
+
+            assets_section = response_data["assets"]
+            assets_list = assets_section.get("items", [])
+
+            if not assets_list:
+                break
+
+            for asset_data in assets_list:
+                if not isinstance(asset_data, dict):
+                    continue
+
+                existing_tags = asset_data.get("tags") or []
+
+                already_processed = any(
+                    isinstance(tag, dict)
+                    and tag.get("id") == processed_tag_id
+                    for tag in existing_tags
+                )
+
+                if already_processed:
+                    continue
+
+                try:
+                    assets.append(Asset(**asset_data))
+                except Exception as e:
+                    self.logger.warning(
+                        f"⚠️ Library '{library_name}': "
+                        f"Failed to parse asset: {e}"
+                    )
+                    continue
+
+                if len(assets) >= limit:
+                    break
+
+            if len(assets) >= limit:
+                break
+
+            next_page = assets_section.get("nextPage")
+
+            if not next_page:
+                break
+
+            try:
+                page = int(next_page)
+            except (TypeError, ValueError):
+                page += 1
+
+        self.logger.info(
+            f"🎯 Library '{library_name}': "
+            f"Found {len(assets)} untreated images "
+            f"in albums: {', '.join(target_album_names)}"
+        )
+
+        return assets
     
     def download_asset(self, asset_id: str, use_thumbnail: bool = True) -> bytes:
         """Download an asset (thumbnail or original)."""
