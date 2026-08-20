@@ -12,6 +12,7 @@ from immich_tagger.processor import (
     ImmichAutoTagger,
     ProcessorError,
 )
+from immich_tagger.config import settings
 
 
 class FakeImmichClient:
@@ -250,6 +251,87 @@ class ProcessorTests(unittest.TestCase):
                 call.args[0].startswith(
                     "📥 Batch download complete: 2/2 images ready in "
                 )
+                for call in processor.logger.info.call_args_list
+            )
+        )
+
+    def test_process_batch_streams_inference_sized_chunks_in_input_order(self):
+        original_inference_batch_size = settings.inference_batch_size
+        settings.inference_batch_size = 2
+        self.addCleanup(
+            setattr,
+            settings,
+            "inference_batch_size",
+            original_inference_batch_size,
+        )
+
+        processor = ImmichAutoTagger.__new__(ImmichAutoTagger)
+        processor.logger = Mock()
+        processor.metrics = Mock()
+        processor.metrics.metrics = {
+            "assets_processed": 0,
+            "tags_assigned": 0,
+            "processing_time": 0,
+            "failures": 0,
+        }
+        processor.processed_tag = Tag(id="processed", name="auto:processed")
+        processor.content_rating_tags = {"key-1": {}}
+        processor.immich_client = Mock()
+        processor.immich_client.api_key = "key-1"
+        processor.immich_client.current_library_name = "Library_1"
+        processor.immich_client.download_asset.side_effect = [
+            b"one",
+            b"two",
+            b"three",
+        ]
+        processor.immich_client.get_or_create_tags_bulk.side_effect = (
+            lambda names: {
+                name: Tag(id=f"id-{name}", name=name)
+                for name in names
+            }
+        )
+        processor.tagging_engine = Mock()
+        processor.tagging_engine.predict_tags_batch.side_effect = [
+            [
+                [TagPrediction(name="tag_one", confidence=0.8)],
+                [TagPrediction(name="tag_two", confidence=0.8)],
+            ],
+            [[TagPrediction(name="tag_three", confidence=0.8)]],
+        ]
+        processor.failure_tracker = Mock()
+        processor.total_processed_assets = 0
+        processor.total_assigned_tags = 0
+        processor.library_metrics = {
+            "Library_1": {
+                "processed_assets": 0,
+                "assigned_tags": 0,
+                "failed_assets": 0,
+            }
+        }
+
+        assets = []
+        for index in range(3):
+            asset = Mock(spec=Asset)
+            asset.id = f"asset-{index + 1}"
+            asset.type = "IMAGE"
+            asset.tags = []
+            asset.originalFileName = f"asset-{index + 1}.jpg"
+            assets.append(asset)
+
+        with patch("immich_tagger.processor.performance_monitor"):
+            result = processor.process_batch(assets)
+
+        self.assertEqual(
+            [call.args[0] for call in processor.tagging_engine.predict_tags_batch.call_args_list],
+            [[b"one", b"two"], [b"three"]],
+        )
+        self.assertEqual(
+            [item.tags_assigned for item in result.results],
+            [["tag_one"], ["tag_two"], ["tag_three"]],
+        )
+        self.assertTrue(
+            any(
+                "Download chunk 2/2 complete" in call.args[0]
                 for call in processor.logger.info.call_args_list
             )
         )

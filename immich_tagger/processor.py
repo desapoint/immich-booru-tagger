@@ -258,6 +258,29 @@ class ImmichAutoTagger:
             return self._apply_predictions(asset, predictions, start_time)
         except Exception as e:
             return self._failed_result(asset.id, start_time, e)
+
+    def _download_inference_chunk(self, inference_items):
+        """Download one bounded inference chunk in deterministic order."""
+        downloaded_items = []
+        failed_results = {}
+
+        for index, asset, asset_start_time in inference_items:
+            try:
+                image_data = self.immich_client.download_asset(
+                    asset.id,
+                    use_thumbnail=True,
+                )
+                downloaded_items.append(
+                    (index, asset, image_data, asset_start_time)
+                )
+            except Exception as e:
+                failed_results[index] = self._failed_result(
+                    asset.id,
+                    asset_start_time,
+                    e,
+                )
+
+        return downloaded_items, failed_results
     
     def process_batch(self, assets: List[Asset]) -> BatchProcessingResult:
         """Process a batch of assets with optimized bulk operations."""
@@ -270,7 +293,6 @@ class ImmichAutoTagger:
         except Exception as e:
             self.logger.warning(f"⚠️  Failed to pre-warm tag cache: {str(e)}")
 
-        download_start_time = time.time()
         inference_items = []
         for index, asset in enumerate(assets):
             asset_start_time = time.time()
@@ -291,77 +313,101 @@ class ImmichAutoTagger:
                 )
                 continue
 
-            try:
-                image_data = self.immich_client.download_asset(
-                    asset.id,
-                    use_thumbnail=True,
-                )
-                inference_items.append(
-                    (index, asset, image_data, asset_start_time)
-                )
-            except Exception as e:
-                results[index] = self._failed_result(
-                    asset.id,
-                    asset_start_time,
-                    e,
-                )
-
-        download_time = time.time() - download_start_time
-        self.logger.info(
-            "📥 Batch download complete: "
-            f"{len(inference_items)}/{len(assets)} images ready "
-            f"in {download_time:.1f}s"
-        )
+            inference_items.append((index, asset, asset_start_time))
 
         if inference_items:
             try:
                 tagging_engine = self._get_tagging_engine()
             except Exception as e:
-                for index, asset, _, asset_start_time in inference_items:
+                for index, asset, asset_start_time in inference_items:
                     results[index] = self._failed_result(
                         asset.id,
                         asset_start_time,
                         e,
                     )
             else:
-                try:
-                    prediction_batches = tagging_engine.predict_tags_batch(
-                        [item[2] for item in inference_items]
-                    )
-                    if len(prediction_batches) != len(inference_items):
-                        raise ProcessorError(
-                            "Tagging engine returned an unexpected batch size"
-                        )
+                chunk_size = settings.inference_batch_size
+                total_chunks = (
+                    len(inference_items) + chunk_size - 1
+                ) // chunk_size
+                downloaded_count = 0
+                download_time = 0.0
 
-                    for item, predictions in zip(
-                        inference_items,
-                        prediction_batches,
-                    ):
-                        index, asset, _, asset_start_time = item
-                        results[index] = self._apply_predictions(
-                            asset,
-                            predictions,
-                            asset_start_time,
-                        )
-                except Exception as e:
-                    self.logger.warning(
-                        "⚠️  Batched inference failed; retrying images "
-                        f"individually: {e}"
+                for chunk_number, offset in enumerate(
+                    range(0, len(inference_items), chunk_size),
+                    start=1,
+                ):
+                    chunk = inference_items[offset:offset + chunk_size]
+                    download_start_time = time.time()
+                    downloaded_items, failed_results = (
+                        self._download_inference_chunk(chunk)
                     )
-                    for index, asset, image_data, asset_start_time in inference_items:
-                        try:
-                            predictions = tagging_engine.predict_tags(image_data)
+                    chunk_download_time = time.time() - download_start_time
+                    download_time += chunk_download_time
+                    downloaded_count += len(downloaded_items)
+                    for index, failed_result in failed_results.items():
+                        results[index] = failed_result
+
+                    self.logger.info(
+                        f"📥 Download chunk {chunk_number}/{total_chunks} "
+                        f"complete: {len(downloaded_items)}/{len(chunk)} "
+                        f"images ready in {chunk_download_time:.1f}s"
+                    )
+
+                    if not downloaded_items:
+                        continue
+
+                    try:
+                        prediction_batches = tagging_engine.predict_tags_batch(
+                            [item[2] for item in downloaded_items]
+                        )
+                        if len(prediction_batches) != len(downloaded_items):
+                            raise ProcessorError(
+                                "Tagging engine returned an unexpected batch size"
+                            )
+
+                        for item, predictions in zip(
+                            downloaded_items,
+                            prediction_batches,
+                        ):
+                            index, asset, _, asset_start_time = item
                             results[index] = self._apply_predictions(
                                 asset,
                                 predictions,
                                 asset_start_time,
                             )
-                        except Exception as item_error:
-                            results[index] = self._failed_result(
-                                asset.id,
-                                asset_start_time,
-                                item_error,
-                            )
+                    except Exception as e:
+                        self.logger.warning(
+                            "⚠️  Batched inference failed; retrying images "
+                            f"individually: {e}"
+                        )
+                        for (
+                            index,
+                            asset,
+                            image_data,
+                            asset_start_time,
+                        ) in downloaded_items:
+                            try:
+                                predictions = tagging_engine.predict_tags(
+                                    image_data
+                                )
+                                results[index] = self._apply_predictions(
+                                    asset,
+                                    predictions,
+                                    asset_start_time,
+                                )
+                            except Exception as item_error:
+                                results[index] = self._failed_result(
+                                    asset.id,
+                                    asset_start_time,
+                                    item_error,
+                                )
+
+                self.logger.info(
+                    "📥 Batch download complete: "
+                    f"{downloaded_count}/{len(assets)} images ready "
+                    f"in {download_time:.1f}s"
+                )
 
         if any(result is None for result in results):
             raise ProcessorError("Batch processing did not produce every result")
