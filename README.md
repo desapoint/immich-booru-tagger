@@ -27,7 +27,7 @@ python -m immich_tagger.main
 2. **AI Processing**: Downloads up to `BATCH_SIZE` assets and evaluates them in bounded ONNX batches
 3. **Auto-Tagging**: Applies predicted tags with confidence filtering
 4. **Self-Managing**: A processed marker excludes completed images from future runs
-5. **Repeats**: Continues until no eligible images remain
+5. **Repeats**: Continues until no eligible images remain or the configured per-run batch limit is reached
 
 **Features**: Resumable, batched inference, self-managing, persistent model cache, multi-library support.
 
@@ -43,6 +43,7 @@ python -m immich_tagger.main
 | `CONFIDENCE_THRESHOLD` | Minimum tag confidence | `0.35` |
 | `CHARACTER_THRESHOLD` | Minimum character-tag confidence | `0.9` |
 | `BATCH_SIZE` | Assets downloaded per processing cycle | `250` |
+| `MAX_BATCHES_PER_RUN` | Maximum batches across all libraries in one scheduled run (`0` = unlimited) | `0` |
 | `INFERENCE_BATCH_SIZE` | Images evaluated in one ONNX call | `8` |
 | `PROCESSED_TAG_NAME` | Marker used to prevent reprocessing | `auto:processed` |
 | `CONTENT_RATING_TAG_NAME` | Parent for hierarchical content ratings | `content-rating` |
@@ -68,6 +69,12 @@ after a complete multi-library run if the next cron occurrence is at least 15
 minutes away. It keeps the session resident when the next run is less than 15
 minutes away. Model loading, retention decisions, and unload completion are
 logged at `INFO`; downloaded files remain cached under `/config/models`.
+
+`MAX_BATCHES_PER_RUN` bounds the work performed by each scheduler occurrence.
+For example, `BATCH_SIZE=250` and `MAX_BATCHES_PER_RUN=4` process at most
+1,000 assets per run. The allowance is shared across configured libraries;
+remaining eligible images resume at the next scheduled run. Runs are guarded
+so a second trigger is skipped while an earlier run is still active.
 
 ### Content ratings
 

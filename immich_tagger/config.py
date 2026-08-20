@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     # Processing Configuration
     confidence_threshold: float = Field(default=0.35, env="CONFIDENCE_THRESHOLD", ge=0.0, le=1.0)
     batch_size: int = Field(default=250, env="BATCH_SIZE", gt=0, description="Maximum assets processed per batch")
+    max_batches_per_run: int = Field(
+        default=0,
+        env="MAX_BATCHES_PER_RUN",
+        ge=0,
+        description="Maximum batches processed per scheduled run (0 = unlimited)",
+    )
     processed_tag_name: str = Field(default="auto:processed", env="PROCESSED_TAG_NAME")
     content_rating_tag_name: str = Field(default="content-rating", env="CONTENT_RATING_TAG_NAME")
     target_albums: str = Field(default="", env="TARGET_ALBUMS")

@@ -1,4 +1,5 @@
 import os
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, Mock, patch
@@ -25,6 +26,98 @@ class SchedulerThreadingTests(unittest.IsolatedAsyncioTestCase):
         to_thread.assert_awaited_once_with(
             scheduler._run_processing_cycle_sync
         )
+
+
+class SchedulerRunControlTests(unittest.TestCase):
+    def setUp(self):
+        self.original_batch_limit = settings.max_batches_per_run
+        self.addCleanup(
+            setattr,
+            settings,
+            "max_batches_per_run",
+            self.original_batch_limit,
+        )
+
+        self.scheduler = Scheduler.__new__(Scheduler)
+        self.scheduler.logger = Mock()
+        self.scheduler.processor = Mock()
+        self.scheduler.timezone = timezone.utc
+        self.scheduler.last_run_time = None
+        self.scheduler._processing_lock = threading.Lock()
+        self.scheduler._manage_model_retention = Mock()
+
+        self.scheduler.processor.immich_client.library_configs = [
+            {"name": "Library_1"},
+            {"name": "Library_2"},
+        ]
+        self.scheduler.processor.immich_client.get_current_user_info.return_value = {
+            "name": "Test User",
+            "email": "test@example.com",
+        }
+        self.scheduler.processor.library_metrics = {
+            "Library_1": {
+                "processed_assets": 0,
+                "assigned_tags": 0,
+            },
+            "Library_2": {
+                "processed_assets": 0,
+                "assigned_tags": 0,
+            },
+        }
+
+    def test_run_stops_at_global_batch_limit(self):
+        settings.max_batches_per_run = 2
+
+        def process_batch():
+            metrics = self.scheduler.processor.library_metrics["Library_1"]
+            metrics["processed_assets"] += 10
+            metrics["assigned_tags"] += 20
+            return True
+
+        self.scheduler.processor.run_processing_cycle.side_effect = process_batch
+
+        result = self.scheduler._run_processing_cycle_sync()
+
+        self.assertTrue(result)
+        self.assertEqual(
+            self.scheduler.processor.run_processing_cycle.call_count,
+            2,
+        )
+        self.scheduler.processor.immich_client.switch_to_library.assert_called_once_with(
+            0
+        )
+        self.assertTrue(
+            any(
+                "Reached per-run limit of 2 batches" in call.args[0]
+                for call in self.scheduler.logger.info.call_args_list
+            )
+        )
+        self.assertFalse(self.scheduler._processing_lock.locked())
+
+    def test_overlapping_run_is_skipped(self):
+        self.scheduler._processing_lock.acquire()
+        self.addCleanup(self.scheduler._processing_lock.release)
+
+        result = self.scheduler._run_processing_cycle_sync()
+
+        self.assertFalse(result)
+        self.scheduler.processor.run_processing_cycle.assert_not_called()
+        self.scheduler.logger.warning.assert_called_once_with(
+            "⏭️  Processing run skipped: another run is already active"
+        )
+        self.scheduler._manage_model_retention.assert_not_called()
+
+    def test_run_lock_is_released_if_model_retention_fails(self):
+        settings.max_batches_per_run = 1
+        self.scheduler.processor.run_processing_cycle.return_value = True
+        self.scheduler._manage_model_retention.side_effect = RuntimeError(
+            "retention failed"
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "retention failed"):
+            self.scheduler._run_processing_cycle_sync()
+
+        self.assertFalse(self.scheduler._processing_lock.locked())
 
 
 class SchedulerModelRetentionTests(unittest.TestCase):

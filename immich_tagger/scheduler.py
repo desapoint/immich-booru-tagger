@@ -4,6 +4,7 @@ Scheduler for continuous operation of the Immich Auto-Tagger.
 
 import asyncio
 from datetime import datetime, timedelta
+import threading
 from typing import Optional
 from croniter import croniter
 import pytz
@@ -25,6 +26,7 @@ class Scheduler:
         self.running = False
         self.timezone = pytz.timezone(settings.timezone)
         self.last_run_time: Optional[datetime] = None
+        self._processing_lock = threading.Lock()
         
     def _get_next_run_time(self) -> datetime:
         """Get the next scheduled run time based on cron expression."""
@@ -55,7 +57,7 @@ class Scheduler:
     
     async def _run_processing_cycle(self):
         """Run synchronous multi-library processing outside the event loop."""
-        await asyncio.to_thread(self._run_processing_cycle_sync)
+        return await asyncio.to_thread(self._run_processing_cycle_sync)
 
     def _manage_model_retention(self):
         """Unload the model unless another scheduled run is less than 15m away."""
@@ -91,6 +93,12 @@ class Scheduler:
 
     def _run_processing_cycle_sync(self):
         """Run a processing cycle for all libraries."""
+        if not self._processing_lock.acquire(blocking=False):
+            self.logger.warning(
+                "⏭️  Processing run skipped: another run is already active"
+            )
+            return False
+
         try:
             self.logger.info("🚀 Starting scheduled multi-library processing cycle")
             
@@ -99,6 +107,8 @@ class Scheduler:
             
             total_processed = 0
             total_tags = 0
+            batches_processed = 0
+            batch_limit_reached = False
             library_configs = self.processor.immich_client.library_configs
             
             for i, library_config in enumerate(library_configs):
@@ -114,14 +124,25 @@ class Scheduler:
                     # Set current library in processor
                     self.processor.set_current_library(library_name)
                     
-                    # Process this library until complete
+                    # Process this library until complete or this run reaches
+                    # its global batch allowance.
                     library_start_processed = self.processor.library_metrics.get(library_name, {}).get("processed_assets", 0)
                     library_start_tags = self.processor.library_metrics.get(library_name, {}).get("assigned_tags", 0)
+                    library_complete = False
                     
                     while True:
+                        if (
+                            settings.max_batches_per_run > 0
+                            and batches_processed >= settings.max_batches_per_run
+                        ):
+                            batch_limit_reached = True
+                            break
+
                         cycle_result = self.processor.run_processing_cycle()
                         if not cycle_result:
+                            library_complete = True
                             break
+                        batches_processed += 1
                     
                     # Calculate library totals
                     library_processed = self.processor.library_metrics.get(library_name, {}).get("processed_assets", 0) - library_start_processed
@@ -130,18 +151,45 @@ class Scheduler:
                     total_processed += library_processed
                     total_tags += library_tags
                     
-                    self.logger.info(f"✅ Library '{library_name}' complete: {library_processed} assets processed, {library_tags} tags assigned")
+                    if library_complete:
+                        self.logger.info(f"✅ Library '{library_name}' complete: {library_processed} assets processed, {library_tags} tags assigned")
+                    else:
+                        self.logger.info(
+                            f"⏸️  Library '{library_name}' paused: "
+                            f"{library_processed} assets processed, "
+                            f"{library_tags} tags assigned"
+                        )
+
+                    if batch_limit_reached:
+                        break
                     
                 except Exception as e:
                     self.logger.error(f"❌ Error processing library '{library_name}': {e}")
                     continue
             
-            self.logger.info(f"🎉 All libraries processed: {total_processed} total assets, {total_tags} total tags assigned")
+            if batch_limit_reached:
+                self.logger.info(
+                    f"🔢 Reached per-run limit of "
+                    f"{settings.max_batches_per_run} batches; remaining "
+                    "eligible images will wait until the next run"
+                )
+                self.logger.info(
+                    f"🏁 Run complete: {batches_processed} batches, "
+                    f"{total_processed} total assets, {total_tags} total tags assigned"
+                )
+            else:
+                self.logger.info(f"🎉 All libraries processed: {total_processed} total assets, {total_tags} total tags assigned")
+
+            return True
             
         except Exception as e:
             self.logger.error(f"❌ Error during scheduled processing cycle: {e}")
+            return False
         finally:
-            self._manage_model_retention()
+            try:
+                self._manage_model_retention()
+            finally:
+                self._processing_lock.release()
     
     async def _scheduler_loop(self):
         """Main scheduler loop."""
