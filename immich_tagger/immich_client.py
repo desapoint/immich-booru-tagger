@@ -152,7 +152,7 @@ class ImmichClient:
     
     def _setup_http_client(self):
         """Setup HTTP client with current library's API key."""
-        # HTTP client with retry logic
+        # Initialize HTTP client
         self.client = httpx.Client(
             timeout=self.timeout,
             headers={
@@ -204,7 +204,7 @@ class ImmichClient:
                         f"⚠️  Server error {e.response.status_code}, retrying "
                         f"(attempt {attempt + 1}/{self.max_retries})"
                     )
-                    time.sleep(self.retry_delay * (2 ** attempt))  # Exponential backoff
+                    time.sleep(self.retry_delay * (2 ** attempt))
                     continue
                 else:
                     self.logger.error(
@@ -247,7 +247,7 @@ class ImmichClient:
                 
             except httpx.HTTPStatusError as e:
                 if e.response.status_code >= 500 and attempt < self.max_retries:
-                    time.sleep(self.retry_delay * (2 ** attempt))  # Exponential backoff
+                    time.sleep(self.retry_delay * (2 ** attempt))
                     continue
                 else:
                     raise ImmichAPIError(f"HTTP {e.response.status_code}: {e.response.text}")
@@ -397,10 +397,9 @@ class ImmichClient:
           Anime,Hentai
             -> return untreated assets in Anime OR Hentai
 
-        When album filtering is enabled, an asset is considered treated
-        when Immich's metadata search matches it against processed_tag_id.
-        Search results do not reliably embed their tags, so processed IDs are
-        fetched separately and subtracted from the album assets.
+        Each target album is queried separately because Immich metadata search
+        may return no results when multiple albumIds are supplied together.
+        Results are merged and de-duplicated by asset ID.
         """
 
         target_album_names = [
@@ -412,7 +411,6 @@ class ImmichClient:
         if limit < 1:
             raise ImmichAPIError("Asset search limit must be positive")
 
-        # Preserve the original tagger behavior when no albums are targeted.
         if not target_album_names:
             return self.get_untagged_assets(limit=limit)
 
@@ -421,7 +419,6 @@ class ImmichClient:
 
         library_name = self.current_library_name
 
-        # Resolve configured album names.
         response = self._make_request(
             method="GET",
             endpoint="/api/albums"
@@ -441,30 +438,20 @@ class ImmichClient:
             album_id = album.get("id")
 
             if name and album_id:
-                albums_by_name.setdefault(
-                    name.casefold(),
-                    []
-                ).append(album_id)
+                albums_by_name.setdefault(name.casefold(), []).append(album_id)
 
         album_ids = []
         missing_albums = []
         resolved_album_names = []
 
         for requested_name in target_album_names:
-            matches = albums_by_name.get(
-                requested_name.casefold(),
-                []
-            )
+            matches = albums_by_name.get(requested_name.casefold(), [])
 
-            try:
-                if not matches:
-                    raise ImmichAPIError(
-                        f"Target album was not found: {requested_name}"
-                    )
-            except ImmichAPIError as e:
+            if not matches:
                 missing_albums.append(requested_name)
                 self.logger.error(
-                    f"❌ Library '{library_name}': {e}"
+                    f"❌ Library '{library_name}': "
+                    f"Target album was not found: {requested_name}"
                 )
                 continue
 
@@ -487,48 +474,57 @@ class ImmichClient:
 
         self.logger.info(
             f"🎯 Library '{library_name}': "
-            f"Filtering to albums: "
-            f"{', '.join(resolved_album_names)}"
+            f"Filtering to albums: {', '.join(resolved_album_names)}"
         )
 
-        search_filters = {
-            "albumIds": album_ids,
-            "type": "IMAGE"
-        }
-
         processed_asset_ids = set()
-        for asset_data in self._iter_metadata_asset_items(
-            {**search_filters, "tagIds": [processed_tag_id]}
-        ):
-            asset_id = asset_data.get("id")
-            if not asset_id:
-                raise ImmichAPIError(
-                    "Processed asset search returned an asset without an ID"
-                )
-            processed_asset_ids.add(asset_id)
+        for album_id in album_ids:
+            for asset_data in self._iter_metadata_asset_items(
+                {
+                    "albumIds": [album_id],
+                    "type": "IMAGE",
+                    "tagIds": [processed_tag_id],
+                }
+            ):
+                asset_id = asset_data.get("id")
+                if not asset_id:
+                    raise ImmichAPIError(
+                        "Processed asset search returned an asset without an ID"
+                    )
+                processed_asset_ids.add(asset_id)
 
         assets = []
+        seen_asset_ids = set()
         page_size = min(250, limit)
 
-        for asset_data in self._iter_metadata_asset_items(
-            search_filters,
-            page_size=page_size
-        ):
-            asset_id = asset_data.get("id")
-            if not asset_id:
-                raise ImmichAPIError(
-                    "Album asset search returned an asset without an ID"
-                )
+        for album_id in album_ids:
+            for asset_data in self._iter_metadata_asset_items(
+                {
+                    "albumIds": [album_id],
+                    "type": "IMAGE",
+                },
+                page_size=page_size,
+            ):
+                asset_id = asset_data.get("id")
+                if not asset_id:
+                    raise ImmichAPIError(
+                        "Album asset search returned an asset without an ID"
+                    )
 
-            if asset_id in processed_asset_ids:
-                continue
+                if asset_id in processed_asset_ids or asset_id in seen_asset_ids:
+                    continue
 
-            try:
-                assets.append(Asset(**asset_data))
-            except Exception as e:
-                raise ImmichAPIError(
-                    f"Failed to parse asset {asset_id}: {e}"
-                ) from e
+                try:
+                    assets.append(Asset(**asset_data))
+                except Exception as e:
+                    raise ImmichAPIError(
+                        f"Failed to parse asset {asset_id}: {e}"
+                    ) from e
+
+                seen_asset_ids.add(asset_id)
+
+                if len(assets) >= limit:
+                    break
 
             if len(assets) >= limit:
                 break
@@ -588,7 +584,6 @@ class ImmichClient:
         """Get all tags from Immich with optional caching."""
         current_time = time.time()
         
-        # Check if cache is valid
         cache_props = self._get_cache_properties()
         if (use_cache and cache_props['valid'] and 
             current_time - cache_props['timestamp'] < cache_props['ttl']):
@@ -601,7 +596,6 @@ class ImmichClient:
         tags_data = response.json()
         tags = [Tag(**tag_data) for tag_data in tags_data]
         
-        # Update cache
         if use_cache:
             self._tag_cache = {self._tag_cache_key(tag): tag for tag in tags}
             self._set_cache_properties(valid=True, timestamp=current_time)
@@ -622,10 +616,7 @@ class ImmichClient:
         
         tag_data = response.json()
         tag = Tag(**tag_data)
-        
-        # Update cache immediately
         self._tag_cache[self._tag_cache_key(tag)] = tag
-        
         self.logger.debug("Created tag", tag_id=tag.id, name=tag.path)
         return tag
 
@@ -638,7 +629,6 @@ class ImmichClient:
     
     def get_or_create_tag(self, tag_name: str) -> Tag:
         """Get an existing tag or create it if it doesn't exist."""
-        # Validate tag name first
         if not self._is_valid_tag_name(tag_name):
             self.logger.debug(f"Skipping invalid tag name: '{tag_name}'")
             raise ValueError(f"Invalid tag name: '{tag_name}'")
@@ -646,40 +636,31 @@ class ImmichClient:
         tag_name_clean = tag_name.strip()
         tag_name_lower = tag_name_clean.casefold()
         
-        # Ensure cache is populated
         cache_props = self._get_cache_properties()
         if not cache_props['valid']:
             self.get_all_tags(use_cache=True)
         
-        # Check cache first
         if tag_name_lower in self._tag_cache:
             performance_monitor.record_cache_hit()
             performance_monitor.record_tag_from_cache()
             return self._tag_cache[tag_name_lower]
         
-        # Create new tag if not found
         performance_monitor.record_cache_miss()
         self.logger.debug("Creating new tag", name=tag_name_clean)
         try:
             tag_request = CreateTagRequest(name=tag_name_clean)
             new_tag = self.create_tag(tag_request)
             performance_monitor.record_tag_created()
-            
-            # Add to cache
             self._tag_cache[tag_name_lower] = new_tag
             return new_tag
             
         except Exception as e:
-            # Handle "tag already exists" case
             if "already exists" in str(e).lower():
-                # Refresh cache and try again
                 self.invalidate_tag_cache()
                 self.get_all_tags(use_cache=True)
                 if tag_name_lower in self._tag_cache:
                     self.logger.debug(f"Found existing tag after cache refresh: {tag_name_clean}")
                     return self._tag_cache[tag_name_lower]
-            
-            # Re-raise the exception if we can't handle it
             raise
 
     def get_or_create_child_tag(self, parent: Tag, child_name: str) -> Tag:
@@ -715,14 +696,11 @@ class ImmichClient:
         if not tag_name or not tag_name.strip():
             return False
         
-        # Only filter out characters that would actually break the API or filesystem
-        # Be more permissive for anime tags which may have special characters
-        invalid_chars = ['\n', '\r', '\t']  # Only control characters
+        invalid_chars = ['\n', '\r', '\t']
         for char in invalid_chars:
             if char in tag_name:
                 return False
         
-        # Check length (reasonable limits)
         tag_cleaned = tag_name.strip()
         if len(tag_cleaned) < 1 or len(tag_cleaned) > 100:
             return False
@@ -734,7 +712,6 @@ class ImmichClient:
         if not tag_names:
             return {}
         
-        # Filter out invalid tag names
         valid_tag_names = [name for name in tag_names if self._is_valid_tag_name(name)]
         if len(valid_tag_names) < len(tag_names):
             invalid_tags = [name for name in tag_names if not self._is_valid_tag_name(name)]
@@ -743,7 +720,6 @@ class ImmichClient:
         if not valid_tag_names:
             return {}
         
-        # Ensure cache is populated
         cache_props = self._get_cache_properties()
         if not cache_props['valid']:
             self.get_all_tags(use_cache=True)
@@ -751,7 +727,6 @@ class ImmichClient:
         result = {}
         missing_tags = []
         
-        # Check which tags exist in cache
         for tag_name in valid_tag_names:
             tag_name_lower = tag_name.casefold()
             if tag_name_lower in self._tag_cache:
@@ -762,7 +737,6 @@ class ImmichClient:
                 missing_tags.append(tag_name)
                 performance_monitor.record_cache_miss()
         
-        # Create missing tags
         if missing_tags:
             performance_monitor.record_bulk_operation()
             self.logger.debug("Creating missing tags", count=len(missing_tags))
@@ -772,9 +746,7 @@ class ImmichClient:
                     result[tag_name] = new_tag
                     performance_monitor.record_tag_created()
                 except Exception as e:
-                    # Check if tag already exists (common race condition)
                     if "already exists" in str(e).lower():
-                        # Refresh cache and try to find the tag
                         self.invalidate_tag_cache()
                         self.get_all_tags(use_cache=True)
                         tag_name_lower = tag_name.casefold()
@@ -785,7 +757,6 @@ class ImmichClient:
                             self.logger.debug(f"Tag exists but not found in cache: {tag_name}")
                     else:
                         self.logger.debug(f"Failed to create tag '{tag_name}': {e}")
-                    # Continue with other tags
                     continue
         
         self.logger.debug("Bulk tag lookup/creation completed", 
@@ -804,7 +775,6 @@ class ImmichClient:
             tag_count=len(tag_ids)
         )
         
-        # Use the correct bulk tagging endpoint with PUT method
         request_data = BulkTagRequest(assetIds=asset_ids, tagIds=tag_ids)
         
         self._make_request(
@@ -842,8 +812,6 @@ class ImmichClient:
             return
         
         self.logger.debug("Tagging single asset", asset_id=asset_id, tag_count=len(tag_ids))
-        
-        # Use the bulk endpoint for single asset tagging (simpler approach)
         request_data = BulkTagRequest(assetIds=[asset_id], tagIds=tag_ids)
         
         self._make_request(
@@ -855,18 +823,12 @@ class ImmichClient:
         self.logger.debug("Tagged single asset", asset_id=asset_id, tag_count=len(tag_ids))
     
     def get_assets_with_tag(self, tag_id: str, limit: Optional[int] = None) -> List[Asset]:
-        """Get all assets that have a specific tag.
-        
-        Args:
-            tag_id: The tag ID to search for
-            limit: Maximum number of assets to return (default: 1000)
-        """
+        """Get all assets that have a specific tag."""
         if limit is None:
-            limit = 1000  # Default reasonable limit for tagged asset queries
+            limit = 1000
             
         self.logger.debug(f"📊 Getting assets with tag {tag_id}, limit={limit}")
         
-        # Use metadata search with specific tag filter
         response = self._make_request(
             method="POST",
             endpoint="/api/search/metadata",
@@ -877,9 +839,8 @@ class ImmichClient:
         assets_section = response_data.get("assets", {})
         assets_list = assets_section.get("items", [])
         
-        # Parse assets
         assets = []
-        for asset_data in assets_list[:limit]:  # Respect limit
+        for asset_data in assets_list[:limit]:
             try:
                 assets.append(Asset(**asset_data))
             except Exception as e:
@@ -951,15 +912,12 @@ class ImmichClient:
     def delete_tag(self, tag_id: str) -> None:
         """Delete a tag from Immich."""
         self.logger.debug("Deleting tag", tag_id=tag_id)
-        
         self._make_request(method="DELETE", endpoint=f"/api/tags/{tag_id}")
-        
         self.logger.info("Deleted tag", tag_id=tag_id)
     
     def test_connection(self) -> bool:
         """Test the connection to Immich."""
         try:
-            # Try to get tags as a simple test
             self.get_all_tags()
             self.logger.info("Connection test successful")
             return True
