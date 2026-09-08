@@ -137,7 +137,7 @@ class WD14ONNXTaggingEngine(BaseTaggingEngine):
                 )
 
             for index, row in enumerate(reader):
-                name = row.get("name", "").strip()
+                name = row.get("name", "").strip().replace("/", "_")
                 try:
                     category = int(row.get("category", ""))
                 except (TypeError, ValueError) as e:
