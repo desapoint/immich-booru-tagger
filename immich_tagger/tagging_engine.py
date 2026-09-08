@@ -21,6 +21,11 @@ GENERAL_CATEGORY = 0
 CHARACTER_CATEGORY = 4
 
 
+def _contains_alphabetic_character(tag_name: str) -> bool:
+    """Return whether a model tag contains at least one alphabetic character."""
+    return any(character.isalpha() for character in tag_name)
+
+
 class TaggingEngineError(Exception):
     """Raised when the tagging model cannot load or perform inference."""
 
@@ -198,7 +203,7 @@ class WD14ONNXTaggingEngine(BaseTaggingEngine):
         self,
         scores: np.ndarray,
     ) -> List[TagPrediction]:
-        """Apply the same WD category thresholds and highest-rating rule."""
+        """Apply WD thresholds while skipping tags without alphabetic characters."""
         if len(scores) != len(self.tag_names):
             raise TaggingEngineError(
                 "ONNX output label count does not match selected_tags.csv: "
@@ -209,23 +214,31 @@ class WD14ONNXTaggingEngine(BaseTaggingEngine):
 
         for index in self.general_indexes:
             confidence = float(scores[index])
-            if confidence >= settings.confidence_threshold:
+            tag_name = self.tag_names[index]
+            if (
+                confidence >= settings.confidence_threshold
+                and _contains_alphabetic_character(tag_name)
+            ):
                 predictions.append(
                     TagPrediction(
-                        name=self.tag_names[index],
+                        name=tag_name,
                         confidence=confidence,
                     )
                 )
 
         for index in self.character_indexes:
             confidence = float(scores[index])
-            if confidence >= max(
-                settings.confidence_threshold,
-                settings.character_threshold,
+            tag_name = self.tag_names[index]
+            if (
+                confidence >= max(
+                    settings.confidence_threshold,
+                    settings.character_threshold,
+                )
+                and _contains_alphabetic_character(tag_name)
             ):
                 predictions.append(
                     TagPrediction(
-                        name=self.tag_names[index],
+                        name=tag_name,
                         confidence=confidence,
                     )
                 )
@@ -235,10 +248,14 @@ class WD14ONNXTaggingEngine(BaseTaggingEngine):
             key=lambda index: float(scores[index]),
         )
         rating_confidence = float(scores[rating_index])
-        if rating_confidence >= settings.confidence_threshold:
+        rating_name = self.tag_names[rating_index]
+        if (
+            rating_confidence >= settings.confidence_threshold
+            and _contains_alphabetic_character(rating_name)
+        ):
             predictions.append(
                 TagPrediction(
-                    name=self.tag_names[rating_index],
+                    name=rating_name,
                     confidence=rating_confidence,
                 )
             )
