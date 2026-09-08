@@ -101,6 +101,28 @@ class WD14ONNXTaggingEngineTests(unittest.TestCase):
             )
         )
 
+    def test_predictions_skip_tags_without_alphabetic_characters(self):
+        self.engine.tag_names = [
+            "general",
+            "123",
+            "0_0",
+            "!!!",
+            "1girl",
+            "3d",
+        ]
+        self.engine.rating_indexes = [0]
+        self.engine.general_indexes = [1, 2, 3, 4, 5]
+        self.engine.character_indexes = []
+
+        predictions = self.engine._predictions_from_scores(
+            np.asarray([0.95, 0.9, 0.85, 0.8, 0.75, 0.7], dtype=np.float32)
+        )
+
+        self.assertEqual(
+            [prediction.name for prediction in predictions],
+            ["general", "1girl", "3d"],
+        )
+
     def test_label_loading_replaces_slashes_only(self):
         csv_data = (
             "name,category\n"
