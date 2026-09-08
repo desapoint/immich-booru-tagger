@@ -21,8 +21,10 @@ GENERAL_CATEGORY = 0
 CHARACTER_CATEGORY = 4
 
 
-def _contains_alphabetic_character(tag_name: str) -> bool:
-    """Return whether a model tag contains at least one alphabetic character."""
+def _is_allowed_model_tag(tag_name: str) -> bool:
+    """Return whether a model tag is valid for assignment in Immich."""
+    if len(tag_name) == 2 and tag_name[0] in {":", ";"}:
+        return False
     return any(character.isalpha() for character in tag_name)
 
 
@@ -203,7 +205,7 @@ class WD14ONNXTaggingEngine(BaseTaggingEngine):
         self,
         scores: np.ndarray,
     ) -> List[TagPrediction]:
-        """Apply WD thresholds while skipping tags without alphabetic characters."""
+        """Apply WD thresholds while skipping invalid model tag names."""
         if len(scores) != len(self.tag_names):
             raise TaggingEngineError(
                 "ONNX output label count does not match selected_tags.csv: "
@@ -217,7 +219,7 @@ class WD14ONNXTaggingEngine(BaseTaggingEngine):
             tag_name = self.tag_names[index]
             if (
                 confidence >= settings.confidence_threshold
-                and _contains_alphabetic_character(tag_name)
+                and _is_allowed_model_tag(tag_name)
             ):
                 predictions.append(
                     TagPrediction(
@@ -234,7 +236,7 @@ class WD14ONNXTaggingEngine(BaseTaggingEngine):
                     settings.confidence_threshold,
                     settings.character_threshold,
                 )
-                and _contains_alphabetic_character(tag_name)
+                and _is_allowed_model_tag(tag_name)
             ):
                 predictions.append(
                     TagPrediction(
@@ -251,7 +253,7 @@ class WD14ONNXTaggingEngine(BaseTaggingEngine):
         rating_name = self.tag_names[rating_index]
         if (
             rating_confidence >= settings.confidence_threshold
-            and _contains_alphabetic_character(rating_name)
+            and _is_allowed_model_tag(rating_name)
         ):
             predictions.append(
                 TagPrediction(
