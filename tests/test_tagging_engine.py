@@ -1,5 +1,6 @@
 import io
 import os
+import tempfile
 import unittest
 from unittest.mock import Mock
 
@@ -99,6 +100,41 @@ class WD14ONNXTaggingEngineTests(unittest.TestCase):
                 "🧠 Inference batch 2/2 complete: 1 image in "
             )
         )
+
+    def test_label_loading_replaces_slashes_only(self):
+        csv_data = (
+            "name,category\n"
+            "general,9\n"
+            "foo/bar,0\n"
+            "foo-bar,0\n"
+            "foo_bar,4\n"
+            "foo/bar/baz,4\n"
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="",
+            delete=False,
+        ) as labels_file:
+            labels_file.write(csv_data)
+            labels_path = labels_file.name
+
+        self.addCleanup(os.unlink, labels_path)
+        self.engine._load_labels(labels_path)
+
+        self.assertEqual(
+            self.engine.tag_names,
+            [
+                "general",
+                "foo_bar",
+                "foo-bar",
+                "foo_bar",
+                "foo_bar_baz",
+            ],
+        )
+        self.assertEqual(self.engine.rating_indexes, [0])
+        self.assertEqual(self.engine.general_indexes, [1, 2])
+        self.assertEqual(self.engine.character_indexes, [3, 4])
 
     def test_transparent_pixels_are_composited_on_white_and_converted_to_bgr(self):
         prepared = self.engine._prepare_image(
