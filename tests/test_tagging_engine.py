@@ -109,6 +109,7 @@ class WD14ONNXTaggingEngineTests(unittest.TestCase):
             "!!!",
             ":D",
             ";P",
+            "69",
             "1girl",
             "3d",
             ":abc",
@@ -120,14 +121,26 @@ class WD14ONNXTaggingEngineTests(unittest.TestCase):
 
         predictions = self.engine._predictions_from_scores(
             np.asarray(
-                [0.95, 0.94, 0.93, 0.92, 0.91, 0.90, 0.89, 0.88, 0.87, 0.86],
+                [
+                    0.95,
+                    0.94,
+                    0.93,
+                    0.92,
+                    0.91,
+                    0.90,
+                    0.895,
+                    0.89,
+                    0.88,
+                    0.87,
+                    0.86,
+                ],
                 dtype=np.float32,
             )
         )
 
         self.assertEqual(
             [prediction.name for prediction in predictions],
-            ["general", "1girl", "3d", ":abc", ";wink"],
+            ["general", "69", "1girl", "3d", ":abc", ";wink"],
         )
 
     def test_label_loading_replaces_slashes_only(self):
