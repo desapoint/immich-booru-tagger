@@ -25,6 +25,8 @@ def _is_allowed_model_tag(tag_name: str) -> bool:
     """Return whether a model tag is valid for assignment in Immich."""
     if len(tag_name) == 2 and tag_name[0] in {":", ";"}:
         return False
+    if tag_name == "69":
+        return True
     return any(character.isalpha() for character in tag_name)
 
 
